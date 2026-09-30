@@ -10,6 +10,16 @@ if [ ! -f "$SPACEBOT_DIR/config.toml" ]; then
     cat > "$SPACEBOT_DIR/config.toml" <<EOF
 [api]
 bind = "::"
+EOF
+
+    # Require a bearer token for the API and dashboard when one is provided
+    if [ -n "$SPACEBOT_API_TOKEN" ]; then
+        cat >> "$SPACEBOT_DIR/config.toml" <<EOF
+auth_token = "env:SPACEBOT_API_TOKEN"
+EOF
+    fi
+
+    cat >> "$SPACEBOT_DIR/config.toml" <<EOF
 
 [llm]
 anthropic_key = "env:ANTHROPIC_API_KEY"
