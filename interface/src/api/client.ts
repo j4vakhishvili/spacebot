@@ -39,6 +39,18 @@ export function getAuthHeaders(): Record<string, string> {
 }
 
 /**
+ * Append the stored token as a `token` query parameter, for requests the
+ * browser issues without custom headers (`EventSource`, `<img>`, downloads).
+ * The server accepts it on GET requests only.
+ */
+export function withAuthQuery(url: string): string {
+	const token = localStorage.getItem(AUTH_TOKEN_KEY);
+	if (!token) return url;
+	const separator = url.includes("?") ? "&" : "?";
+	return `${url}${separator}token=${encodeURIComponent(token)}`;
+}
+
+/**
  * `fetch` for API requests, carrying the bearer token when one is configured.
  *
  * Every request to `/api` must go through this. The server rejects an

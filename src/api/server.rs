@@ -416,6 +416,18 @@ async fn api_auth_middleware(
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|token| token == expected_token);
 
+    // EventSource, <img> and downloads cannot send headers, so GET requests
+    // may carry the token as a `token` query parameter instead.
+    let is_authorized = is_authorized
+        || (request.method() == axum::http::Method::GET
+            && request
+                .uri()
+                .query()
+                .into_iter()
+                .flat_map(|query| query.split('&'))
+                .filter_map(|pair| pair.strip_prefix("token="))
+                .any(|token| token == expected_token));
+
     if is_authorized {
         next.run(request).await
     } else {

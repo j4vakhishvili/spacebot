@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
+import { withAuthQuery } from "@/api/client";
 
 type EventHandler = (data: unknown) => void;
 
@@ -54,7 +55,7 @@ export function useEventSource(url: string, options: UseEventSourceOptions) {
 
 		setConnectionState("connecting");
 
-		const source = new EventSource(url);
+		const source = new EventSource(withAuthQuery(url));
 		eventSourceRef.current = source;
 
 		source.onopen = () => {
