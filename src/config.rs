@@ -2386,6 +2386,10 @@ departments = ["advertising"]
         assert_eq!(authorization.portal_human.as_deref(), Some("operator"));
         assert_eq!(authorization.unattended_access, ToolAccess::Read);
         assert!(authorization.admin_requires_approval);
+        assert_eq!(
+            authorization.approval_timeout,
+            crate::approvals::DEFAULT_APPROVAL_TIMEOUT
+        );
 
         let advertising = authorization.department("advertising").unwrap();
         assert_eq!(advertising.approvers, vec!["lead".to_string()]);
@@ -2477,6 +2481,13 @@ departments = ["advertising"]
                 "[authorization]\nunattended = \"full\"\n",
             ),
             "authorization.unattended can't be `full`",
+        );
+        expect_invalid(
+            &AUTHORIZATION_TOML.replace(
+                "[authorization]\n",
+                "[authorization]\napproval_timeout_secs = 5\n",
+            ),
+            "approval_timeout_secs must be between 30 and 86400",
         );
         expect_invalid(
             &format!("{AUTHORIZATION_TOML}\n[[departments]]\nid = \"everyone\"\n"),

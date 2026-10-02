@@ -27,6 +27,8 @@ pub struct BranchDelegationState {
     /// The people the channel turn acted for when the branch forked. A branch
     /// runs after its turn ends, so it can't read the channel's live slot.
     requesters: Option<Vec<crate::authorization::Requester>>,
+    /// The inbound message of the turn the branch forked from.
+    origin: Option<crate::InboundMessage>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,7 +44,13 @@ impl BranchDelegationState {
             branch_id,
             delegation: Mutex::new(None),
             requesters: None,
+            origin: None,
         }
+    }
+
+    pub fn with_origin(mut self, origin: Option<crate::InboundMessage>) -> Self {
+        self.origin = origin;
+        self
     }
 
     pub fn with_requesters(mut self, requesters: Vec<crate::authorization::Requester>) -> Self {
@@ -1003,10 +1011,15 @@ impl SpawnWorkerTool {
             .branch_delegation
             .as_ref()
             .and_then(|state| state.requesters.clone());
+        let branch_origin = self
+            .branch_delegation
+            .as_ref()
+            .and_then(|state| state.origin.clone());
         let worker_task_context = WorkerTaskContext {
             task_context: planned.as_ref().map(|plan| plan.task_context.as_str()),
             origin_branch_id: self.branch_delegation.as_ref().map(|state| state.branch_id),
             requesters: branch_requesters.as_deref(),
+            origin: branch_origin.as_ref(),
             delegation: delegation.as_ref(),
         };
 

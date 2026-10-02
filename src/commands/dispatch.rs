@@ -108,6 +108,18 @@ pub async fn dispatch_inbound(
     // function declines to handle still has to carry the verdict.
     let is_authority = stamp_authority(message, &scope);
 
+    // Approval answers are decided here, before any channel or model sees
+    // them, so they work mid-turn and can't be reinterpreted as chat.
+    if let Some((approval_id, verdict)) = crate::approvals::parse_answer(&message.content) {
+        let messaging = messaging.clone();
+        let deps = deps.clone();
+        let message = message.clone();
+        tokio::spawn(async move {
+            answer_approval(&messaging, &deps, &message, &approval_id, verdict).await;
+        });
+        return Dispatch::Handled;
+    }
+
     let text = match &message.content {
         MessageContent::Text(text) => text.clone(),
         // Command content arrives from surfaces that parse client-side
@@ -218,6 +230,112 @@ pub async fn dispatch_inbound(
             };
             Dispatch::ForwardCommand
         }
+    }
+}
+
+/// Decide an approval request for the person who answered, and say what
+/// happened: publicly when the answer decided it, privately otherwise.
+async fn answer_approval(
+    messaging: &Arc<MessagingManager>,
+    deps: &crate::AgentDeps,
+    message: &InboundMessage,
+    approval_id: &str,
+    verdict: crate::approvals::ApprovalVerdict,
+) {
+    use crate::approvals::{AnswerResult, ApprovalVerdict};
+
+    let humans = deps.humans.load();
+    let answerer =
+        crate::authorization::resolve_requester(message, &humans, &deps.authorization.load());
+    let answerer_label = crate::approvals::requester_label(&answerer, &humans);
+    match deps.approvals.answer(approval_id, verdict, &answerer).await {
+        AnswerResult::Decided {
+            verdict,
+            server,
+            tool,
+        } => {
+            let decision = match verdict {
+                ApprovalVerdict::Approve => "approved",
+                ApprovalVerdict::Deny => "denied",
+            };
+            tracing::info!(
+                approval_id,
+                decision,
+                answerer = %answerer_label,
+                server = %server,
+                tool = %tool,
+                "approval request decided"
+            );
+            send_reply(
+                messaging,
+                deps,
+                message,
+                OutboundResponse::Text(format!(
+                    "{answerer_label} {decision} `{tool}` on `{server}` (request `{approval_id}`)."
+                )),
+            )
+            .await;
+        }
+        AnswerResult::NotAllowed => {
+            tracing::warn!(
+                approval_id,
+                answerer = %answerer_label,
+                sender_id = %message.sender_id,
+                source = %message.source,
+                "approval answer refused: not an approver"
+            );
+            send_ephemeral(
+                messaging,
+                deps,
+                message,
+                format!(
+                    "You can't decide request `{approval_id}`: only the approvers it lists can."
+                ),
+            )
+            .await;
+        }
+        AnswerResult::NotOpen => {
+            send_ephemeral(
+                messaging,
+                deps,
+                message,
+                format!(
+                    "Request `{approval_id}` isn't open: it was already decided, expired, or \
+                     doesn't exist."
+                ),
+            )
+            .await;
+        }
+    }
+}
+
+async fn send_reply(
+    messaging: &Arc<MessagingManager>,
+    deps: &crate::AgentDeps,
+    target: &InboundMessage,
+    response: OutboundResponse,
+) {
+    if target.adapter_key() == "portal" {
+        if let (Some(api_state), OutboundResponse::Text(text)) =
+            (deps.api_state.as_deref(), &response)
+        {
+            api_state
+                .event_tx
+                .send(crate::api::ApiEvent::OutboundMessage {
+                    agent_id: deps.agent_id.to_string(),
+                    channel_id: target.conversation_id.clone(),
+                    text: text.clone(),
+                })
+                .ok();
+        }
+        return;
+    }
+    if let Err(error) = messaging.respond(target, response).await {
+        tracing::warn!(
+            %error,
+            conversation_id = %target.conversation_id,
+            "failed to deliver approval reply"
+        );
     }
 }
 

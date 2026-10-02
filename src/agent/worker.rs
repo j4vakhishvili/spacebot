@@ -318,6 +318,10 @@ pub struct Worker {
     /// output. The owning agent, unless the worker was delegated to another
     /// agent and runs with that agent's sandbox.
     pub secret_scope: crate::AgentId,
+    /// Message to reply to when a tool call needs approval. `None` (detached
+    /// or resumed workers) means there is nobody to ask, so gated calls are
+    /// refused.
+    pub approval_origin: Option<crate::InboundMessage>,
 }
 
 impl Worker {
@@ -392,6 +396,7 @@ impl Worker {
                 initial_operation,
                 requesters: crate::authorization::RequesterSet::unattended(),
                 secret_scope,
+                approval_origin: None,
             },
             inject_tx,
         )
@@ -613,6 +618,12 @@ impl Worker {
         self
     }
 
+    /// Post approval requests as replies to this message.
+    pub fn with_approval_origin(mut self, origin: Option<crate::InboundMessage>) -> Self {
+        self.approval_origin = origin;
+        self
+    }
+
     /// Scrub output against another agent's tool secrets, for a worker that
     /// runs with that agent's sandbox.
     pub fn with_secret_scope(mut self, secret_scope: crate::AgentId) -> Self {
@@ -630,19 +641,29 @@ impl Worker {
             self.deps.humans.clone(),
             self.requesters.clone(),
         );
+        let approvals = crate::approvals::ApprovalContext {
+            broker: self.deps.approvals.clone(),
+            humans: self.deps.humans.clone(),
+            agent_id: self.deps.agent_id.clone(),
+            worker_id: self.id,
+            channel_id: self.channel_id.clone(),
+            origin: self.approval_origin.clone(),
+            messaging: self.deps.messaging_manager.clone(),
+            api_state: self.deps.api_state.clone(),
+        };
         // The gate is attached even while the policy is inactive, so enabling
         // departments by hot reload also covers workers already running.
         if !gate.is_enabled() {
             return mcp_tools
                 .into_iter()
-                .map(|tool| tool.with_gate(gate.clone()))
+                .map(|tool| tool.with_gate(gate.clone(), approvals.clone()))
                 .collect();
         }
         let offered_count = mcp_tools.len();
         let gated = mcp_tools
             .into_iter()
             .filter(|tool| gate.is_offered(tool.server_name(), tool.tool_name(), tool.hints()))
-            .map(|tool| tool.with_gate(gate.clone()))
+            .map(|tool| tool.with_gate(gate.clone(), approvals.clone()))
             .collect::<Vec<_>>();
         tracing::info!(
             worker_id = %self.id,

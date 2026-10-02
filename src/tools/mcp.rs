@@ -1,5 +1,6 @@
 //! MCP tool adapters that proxy calls to external MCP servers.
 
+use crate::approvals::{ApprovalContext, ApprovalOutcome};
 use crate::authorization::{GateDecision, ToolGate, ToolHints};
 use crate::mcp::McpConnection;
 use crate::tools::truncate_output;
@@ -22,6 +23,8 @@ pub struct McpToolAdapter {
     /// the exact server and tool pair, never the flattened model-facing name,
     /// which can collide across servers.
     gate: Option<ToolGate>,
+    /// Where calls that need approval ask for it.
+    approvals: Option<ApprovalContext>,
 }
 
 impl McpToolAdapter {
@@ -46,6 +49,7 @@ impl McpToolAdapter {
             hints,
             connection,
             gate: None,
+            approvals: None,
         }
     }
 
@@ -62,9 +66,10 @@ impl McpToolAdapter {
     }
 
     /// Check every call against the department policy before it reaches the
-    /// server.
-    pub fn with_gate(mut self, gate: ToolGate) -> Self {
+    /// server, asking for approval where the policy requires it.
+    pub fn with_gate(mut self, gate: ToolGate, approvals: ApprovalContext) -> Self {
         self.gate = Some(gate);
+        self.approvals = Some(approvals);
         self
     }
 
@@ -74,6 +79,64 @@ impl McpToolAdapter {
             sanitize_tool_identifier(&self.server_name),
             sanitize_tool_identifier(&self.tool_name)
         )
+    }
+
+    /// Wait for an approver. Returns only when the call was approved; every
+    /// other outcome is a refusal the model can relay.
+    async fn await_approval(
+        &self,
+        gate: &ToolGate,
+        class: &str,
+        approvers: Vec<String>,
+        args: &Value,
+    ) -> Result<(), McpToolError> {
+        let not_run = |detail: String| {
+            McpToolError(format!(
+                "Not run: `{}` on `{}` is a {class} and needs approval, but {detail}.",
+                self.tool_name, self.server_name
+            ))
+        };
+        let Some(approvals) = &self.approvals else {
+            return Err(not_run("approvals aren't available here".into()));
+        };
+        let requesters = gate.requesters().snapshot();
+        let outcome = approvals
+            .request(
+                &self.server_name,
+                &self.tool_name,
+                class,
+                approvers,
+                args,
+                requesters.clone(),
+                gate.approval_timeout(),
+            )
+            .await
+            .map_err(not_run)?;
+        let humans = approvals.humans.load();
+        match outcome {
+            ApprovalOutcome::Approved { by } => {
+                tracing::info!(
+                    server = %self.server_name,
+                    tool = %self.tool_name,
+                    class,
+                    approved_by = %by,
+                    requesters = ?requesters,
+                    "mcp call approved"
+                );
+                Ok(())
+            }
+            ApprovalOutcome::Denied { by } => Err(McpToolError(format!(
+                "Not run: {} denied `{}` on `{}`. Don't retry it; tell the person who asked.",
+                crate::approvals::human_label(&by, &humans),
+                self.tool_name,
+                self.server_name
+            ))),
+            ApprovalOutcome::Expired => Err(not_run(
+                "no approver answered in time, so it was treated as denied. Don't retry it \
+                 unless the person asks again"
+                    .into(),
+            )),
+        }
     }
 
     fn collect_result_text(result: &rmcp::model::CallToolResult) -> String {
@@ -147,22 +210,8 @@ impl Tool for McpToolAdapter {
                     );
                     return Err(McpToolError(format!("Not permitted: {reason}")));
                 }
-                GateDecision::RequireApproval { class } => {
-                    // Approvals are not wired yet, so a gated call fails
-                    // closed rather than running unapproved.
-                    tracing::info!(
-                        server = %self.server_name,
-                        tool = %self.tool_name,
-                        class = %class,
-                        requesters = ?gate.requesters().snapshot(),
-                        "mcp call needs approval; refused until approvals are available"
-                    );
-                    return Err(McpToolError(format!(
-                        "Not run: `{}` on `{}` is a {class} and needs approval from an \
-                         approver, which this assistant can't request yet. Ask an approver \
-                         to make this change directly.",
-                        self.tool_name, self.server_name
-                    )));
+                GateDecision::RequireApproval { class, approvers } => {
+                    self.await_approval(gate, &class, approvers, &args).await?;
                 }
             }
         }

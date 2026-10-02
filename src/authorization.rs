@@ -343,9 +343,11 @@ fn matches_any(patterns: &[String], value: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     Allow,
-    /// The call is permitted only after an approver signs off.
+    /// The call is permitted only after an approver signs off. `approvers`
+    /// are the human ids allowed to approve it, admins included.
     RequireApproval {
         class: String,
+        approvers: Vec<String>,
     },
     /// Refused. `reason` is written for the model to relay to the person.
     Deny {
@@ -391,7 +393,7 @@ pub fn decide(
         requesters
     };
     let several = requesters.len() > 1;
-    requesters
+    let decisions = requesters
         .iter()
         .map(|requester| {
             decide_for_requester(
@@ -404,8 +406,43 @@ pub fn decide(
                 several,
             )
         })
-        .max_by_key(GateDecision::severity)
-        .unwrap_or(GateDecision::Allow)
+        .collect::<Vec<_>>();
+    let Some(worst) = decisions.iter().max_by_key(|decision| decision.severity()) else {
+        return GateDecision::Allow;
+    };
+    match worst {
+        GateDecision::RequireApproval { class, .. } => {
+            // Every requester who needs approval must accept the approver, so
+            // only people on all of their lists may approve. Admins always can.
+            let mut approvers: Option<Vec<String>> = None;
+            for decision in &decisions {
+                if let GateDecision::RequireApproval {
+                    approvers: department_approvers,
+                    ..
+                } = decision
+                {
+                    approvers = Some(match approvers {
+                        None => department_approvers.clone(),
+                        Some(current) => current
+                            .into_iter()
+                            .filter(|approver| department_approvers.contains(approver))
+                            .collect(),
+                    });
+                }
+            }
+            let mut approvers = approvers.unwrap_or_default();
+            for human in humans.iter().filter(|human| human.admin) {
+                if !approvers.contains(&human.id) {
+                    approvers.push(human.id.clone());
+                }
+            }
+            GateDecision::RequireApproval {
+                class: class.clone(),
+                approvers,
+            }
+        }
+        other => other.clone(),
+    }
 }
 
 /// One grant that applies to a call: the access it gives and the write
@@ -413,6 +450,8 @@ pub fn decide(
 struct Grant<'a> {
     access: ToolAccess,
     require_approval: &'a [String],
+    /// Approvers of the department that made the grant.
+    approvers: &'a [String],
 }
 
 fn decide_for_requester(
@@ -446,18 +485,26 @@ fn decide_for_requester(
         }
         Requester::Human { id } => match humans.iter().find(|human| human.id == *id) {
             Some(human) if human.admin => {
-                let approval_classes = if authorization.admin_requires_approval {
+                let approval_grants = if authorization.admin_requires_approval {
                     authorization
                         .departments
                         .iter()
-                        .flat_map(|department| &department.policies)
-                        .filter(|policy| policy_matches(policy, server, tool))
-                        .flat_map(|policy| policy.require_approval.iter().cloned())
+                        .flat_map(|department| {
+                            department
+                                .policies
+                                .iter()
+                                .filter(|policy| policy_matches(policy, server, tool))
+                                .map(|policy| Grant {
+                                    access: policy.access,
+                                    require_approval: &policy.require_approval,
+                                    approvers: &department.approvers,
+                                })
+                        })
                         .collect::<Vec<_>>()
                 } else {
                     Vec::new()
                 };
-                (Vec::new(), Some(approval_classes))
+                (Vec::new(), Some(approval_grants))
             }
             Some(human) => (
                 grants_for_departments(authorization, &human.departments, server, tool),
@@ -468,14 +515,23 @@ fn decide_for_requester(
         Requester::Unknown { .. } => (default_department_grants(authorization, server, tool), None),
     };
 
-    if let Some(approval_classes) = admin_approval {
+    if let Some(approval_grants) = admin_approval {
         return match class {
             ToolClass::Read => GateDecision::Allow,
-            ToolClass::Write { class } => match approval_class(&approval_classes, class.as_deref())
-            {
-                Some(class) => GateDecision::RequireApproval { class },
-                None => GateDecision::Allow,
-            },
+            ToolClass::Write { class } => {
+                let mut required = None;
+                let mut approvers = Vec::new();
+                for grant in &approval_grants {
+                    if let Some(found) = approval_class(grant.require_approval, class.as_deref()) {
+                        required = Some(found);
+                        extend_unique(&mut approvers, grant.approvers);
+                    }
+                }
+                match required {
+                    Some(class) => GateDecision::RequireApproval { class, approvers },
+                    None => GateDecision::Allow,
+                }
+            }
             ToolClass::Deny => GateDecision::Deny {
                 reason: format!("`{tool}` on `{server}` is not available to anyone."),
             },
@@ -514,20 +570,32 @@ fn decide_for_requester(
                 };
             }
             let mut required = None;
+            let mut approvers = Vec::new();
             for grant in full_grants {
                 match approval_class(grant.require_approval, class.as_deref()) {
                     None => return GateDecision::Allow,
-                    Some(class) => required = Some(class),
+                    Some(class) => {
+                        required = Some(class);
+                        extend_unique(&mut approvers, grant.approvers);
+                    }
                 }
             }
             match required {
-                Some(class) => GateDecision::RequireApproval { class },
+                Some(class) => GateDecision::RequireApproval { class, approvers },
                 None => GateDecision::Allow,
             }
         }
         ToolClass::Deny => GateDecision::Deny {
             reason: format!("`{tool}` on `{server}` is not available to anyone."),
         },
+    }
+}
+
+fn extend_unique(target: &mut Vec<String>, values: &[String]) {
+    for value in values {
+        if !target.contains(value) {
+            target.push(value.clone());
+        }
     }
 }
 
@@ -566,10 +634,11 @@ fn grants_for_departments<'a>(
                 .policies
                 .iter()
                 .find(|policy| policy_matches(policy, server, tool))
-        })
-        .map(|policy| Grant {
-            access: policy.access,
-            require_approval: &policy.require_approval,
+                .map(|policy| Grant {
+                    access: policy.access,
+                    require_approval: &policy.require_approval,
+                    approvers: &department.approvers,
+                })
         })
         .collect::<Vec<_>>();
     if departments.is_empty() {
@@ -635,6 +704,11 @@ impl ToolGate {
 
     pub fn requesters(&self) -> &RequesterSet {
         &self.requesters
+    }
+
+    /// How long a call that needs approval waits for an answer.
+    pub fn approval_timeout(&self) -> std::time::Duration {
+        self.authorization.load().approval_timeout
     }
 
     /// Check one call. `args` is `None` when deciding whether to offer the
@@ -941,7 +1015,8 @@ mod tests {
                 None
             ),
             GateDecision::RequireApproval {
-                class: "campaign_mutation".into()
+                class: "campaign_mutation".into(),
+                approvers: vec!["lead".into(), "root".into()],
             }
         );
         assert_eq!(
@@ -952,7 +1027,8 @@ mod tests {
                 None
             ),
             GateDecision::RequireApproval {
-                class: "campaign_mutation".into()
+                class: "campaign_mutation".into(),
+                approvers: vec!["lead".into(), "root".into()],
             }
         );
     }
@@ -1057,7 +1133,62 @@ mod tests {
                 None
             ),
             GateDecision::RequireApproval {
-                class: "campaign_mutation".into()
+                class: "campaign_mutation".into(),
+                approvers: vec!["lead".into(), "root".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn several_requesters_share_only_common_approvers() {
+        let mut authorization = authorization();
+        authorization
+            .departments
+            .push(crate::config::DepartmentDef {
+                id: "programmatic".into(),
+                approvers: vec!["trader".into()],
+                policies: vec![policy(
+                    &["agmcp-*"],
+                    ToolAccess::Full,
+                    &["campaign_mutation"],
+                )],
+            });
+        let mut humans = humans();
+        humans.push(human("trader", &["programmatic"]));
+        humans.push(human("buyer", &["programmatic"]));
+        let class = ToolClass::Write {
+            class: Some("campaign_mutation".into()),
+        };
+        // Each department's approver alone is not enough once both
+        // departments' people direct the worker; only admins remain.
+        let decision = decide(
+            &authorization,
+            &humans,
+            &[person("advertiser"), person("buyer")],
+            "agmcp-google-ads",
+            "update_campaign",
+            &class,
+        );
+        assert_eq!(
+            decision,
+            GateDecision::RequireApproval {
+                class: "campaign_mutation".into(),
+                approvers: vec!["root".into()],
+            }
+        );
+        let decision = decide(
+            &authorization,
+            &humans,
+            &[person("buyer")],
+            "agmcp-google-ads",
+            "update_campaign",
+            &class,
+        );
+        assert_eq!(
+            decision,
+            GateDecision::RequireApproval {
+                class: "campaign_mutation".into(),
+                approvers: vec!["trader".into(), "root".into()],
             }
         );
     }

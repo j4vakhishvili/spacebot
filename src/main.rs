@@ -2510,6 +2510,18 @@ async fn initialize_agents(
         // workers can access project directories even outside the workspace.
         spacebot::projects::refresh_sandbox_project_paths(&project_store, &sandbox).await;
 
+        // Approvals pending at shutdown belonged to workers that didn't
+        // survive it; they fail closed.
+        let approvals = Arc::new(spacebot::approvals::ApprovalBroker::new(db.sqlite.clone()));
+        match approvals.expire_interrupted().await {
+            Ok(0) => {}
+            Ok(expired) => {
+                tracing::info!(agent_id = %agent_config.id, expired, "expired approvals left pending by restart")
+            }
+            Err(error) => {
+                tracing::warn!(%error, agent_id = %agent_config.id, "failed to expire interrupted approvals")
+            }
+        }
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
             memory_search,
@@ -2529,6 +2541,7 @@ async fn initialize_agents(
             memory_event_tx,
             tool_output_tx,
             sqlite_pool: db.sqlite.clone(),
+            approvals: approvals.clone(),
             messaging_manager: None,
             sandbox,
             links: agent_links.clone(),

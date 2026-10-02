@@ -50,6 +50,7 @@ pub(super) struct TomlAuthorizationConfig {
     pub(super) unattended: Option<String>,
     pub(super) portal_human: Option<String>,
     pub(super) admin_requires_approval: Option<bool>,
+    pub(super) approval_timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]

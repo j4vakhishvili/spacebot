@@ -527,6 +527,10 @@ pub struct ChannelState {
     /// policy. Workers spawned in the turn inherit them. System retriggers
     /// keep the previous turn's requesters, as they continue its work.
     pub turn_requesters: Arc<std::sync::RwLock<Vec<crate::authorization::Requester>>>,
+    /// The inbound message the current turn answers. Workers spawned in the
+    /// turn post approval requests as replies to it, so they land in the
+    /// same thread.
+    pub turn_origin: Arc<std::sync::RwLock<Option<InboundMessage>>>,
 }
 
 impl ChannelState {
@@ -544,6 +548,22 @@ impl ChannelState {
             Err(poisoned) => poisoned.into_inner(),
         };
         *guard = requesters;
+    }
+
+    /// The inbound message the current turn answers, if any.
+    pub fn current_origin(&self) -> Option<InboundMessage> {
+        match self.turn_origin.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn set_turn_origin(&self, origin: InboundMessage) {
+        let mut guard = match self.turn_origin.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = Some(origin);
     }
 
     pub fn autonomy_run(&self) -> Option<crate::agent::autonomy::AutonomyRunHandle> {
@@ -1030,6 +1050,7 @@ impl Channel {
             turn_requesters: Arc::new(std::sync::RwLock::new(vec![
                 crate::authorization::Requester::Unattended,
             ])),
+            turn_origin: Arc::new(std::sync::RwLock::new(None)),
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -2473,6 +2494,7 @@ impl Channel {
         // metadata (e.g. Slack thread_ts) for outbound responses.
         if let Some(last_real) = messages.iter().rev().find(|m| m.source != "system") {
             self.current_inbound = Some(last_real.clone());
+            self.state.set_turn_origin(last_real.clone());
         }
         if let Some(requesters) = crate::authorization::resolve_batch_requesters(
             &messages,
@@ -2547,6 +2569,7 @@ impl Channel {
         // System retrigger messages keep the previous inbound target.
         if message.source != "system" {
             self.current_inbound = Some(message.clone());
+            self.state.set_turn_origin(message.clone());
             self.state
                 .set_turn_requesters(vec![crate::authorization::resolve_requester(
                     &message,

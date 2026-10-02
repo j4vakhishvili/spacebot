@@ -2875,6 +2875,18 @@ fn resolve_authorization(
         },
     };
 
+    let approval_timeout = match toml.approval_timeout_secs {
+        None => crate::approvals::DEFAULT_APPROVAL_TIMEOUT,
+        Some(seconds) if (30..=86_400).contains(&seconds) => {
+            std::time::Duration::from_secs(seconds)
+        }
+        Some(seconds) => {
+            return Err(invalid(format!(
+                "authorization.approval_timeout_secs must be between 30 and 86400 (got {seconds})"
+            )));
+        }
+    };
+
     let mut resolved_departments: Vec<DepartmentDef> = Vec::with_capacity(departments.len());
     for department in departments {
         let id = department.id.trim().to_string();
@@ -2987,6 +2999,7 @@ fn resolve_authorization(
         unattended_access,
         portal_human: toml.portal_human,
         admin_requires_approval: toml.admin_requires_approval.unwrap_or(true),
+        approval_timeout,
         departments: resolved_departments,
         tool_rules: resolved_rules,
     })

@@ -560,7 +560,11 @@ async fn spawn_branch(
 
     let branch_id = crate::BranchId::new_v4();
     let branch_delegation = matches!(&profile, BranchToolProfile::Default).then(|| {
-        Arc::new(BranchDelegationState::new(branch_id).with_requesters(state.current_requesters()))
+        Arc::new(
+            BranchDelegationState::new(branch_id)
+                .with_requesters(state.current_requesters())
+                .with_origin(state.current_origin()),
+        )
     });
     let tool_server = crate::tools::create_branch_tool_server(
         Some(state.clone()),
@@ -743,6 +747,9 @@ pub struct WorkerTaskContext<'a> {
     /// Requesters captured when a branch forked. `None` uses the channel's
     /// current turn.
     pub requesters: Option<&'a [crate::authorization::Requester]>,
+    /// Inbound message captured when a branch forked. `None` uses the
+    /// channel's current turn.
+    pub origin: Option<&'a crate::InboundMessage>,
     /// Run the worker as this agent instead of the channel's own.
     pub delegation: Option<&'a crate::agent::delegation::DelegationTarget>,
 }
@@ -1194,7 +1201,14 @@ async fn spawn_worker_inner(
         (worker, None, Some(inject_tx))
     };
     let (worker, input_tx, injection_tx) = worker;
-    let worker = worker.with_requesters(requesters.clone());
+    let worker = worker
+        .with_requesters(requesters.clone())
+        .with_approval_origin(
+            task_context
+                .origin
+                .cloned()
+                .or_else(|| state.current_origin()),
+        );
     let worker = match delegation {
         Some(target) => worker.with_secret_scope(target.agent_id.clone()),
         None => worker,

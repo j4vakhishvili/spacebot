@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod approvals;
 pub mod auth;
 pub mod authorization;
 pub mod commands;
@@ -554,6 +555,8 @@ pub struct AgentDeps {
     /// control event bus so high-volume output doesn't crowd out critical events.
     pub tool_output_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
+    /// Open approval requests for this agent's gated tool calls.
+    pub approvals: Arc<approvals::ApprovalBroker>,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
     pub sandbox: Arc<sandbox::Sandbox>,
     pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,

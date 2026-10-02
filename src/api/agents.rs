@@ -551,6 +551,7 @@ pub(super) async fn trigger_warmup(
                 memory_event_tx,
                 tool_output_tx,
                 sqlite_pool: sqlite_pool.clone(),
+                approvals: Arc::new(crate::approvals::ApprovalBroker::new(sqlite_pool.clone())),
                 messaging_manager: None,
                 sandbox,
                 task_store,
@@ -1016,6 +1017,7 @@ pub async fn create_agent_internal(
         memory_event_tx: memory_event_tx.clone(),
         tool_output_tx: tool_output_tx.clone(),
         sqlite_pool: db.sqlite.clone(),
+        approvals: Arc::new(crate::approvals::ApprovalBroker::new(db.sqlite.clone())),
         messaging_manager: Some(messaging_manager.clone()),
         sandbox: sandbox.clone(),
         links: Arc::new(arc_swap::ArcSwap::from_pointee(

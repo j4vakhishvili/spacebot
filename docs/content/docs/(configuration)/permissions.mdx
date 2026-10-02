@@ -297,6 +297,7 @@ default_department = "everyone"   # senders that match no [[humans]] entry
 unattended = "read"               # cron, autonomy, workers resumed after a restart: "none" | "read"
 portal_human = "jamie"            # optional: who portal messages act as
 admin_requires_approval = true    # admins still hit approval classes (default true)
+approval_timeout_secs = 600       # how long a gated call waits for an approver (30–86400)
 
 [[departments]]
 id = "everyone"
@@ -344,7 +345,13 @@ admin = false
 
 **Enforcement.** Unlike the per-agent permissions above, tools a worker's requesters can never use are left out of the worker entirely, which also keeps them out of the model's context. Everything else is checked again on every call against the live policy, and a refusal comes back as a tool error that explains who lacks access. Config changes hot-reload.
 
-Approval prompts are not implemented yet: a call that needs approval is refused with an explanation instead of running unapproved. OpenCode workers receive no MCP servers, so the policy has nothing to gate there.
+**Approvals.** A call that needs approval pauses the worker's tool call and posts a request into the conversation that owns the worker, as a reply to the message that started the work, so it lands in the same Slack thread. The request shows the tool, server, class, a scrubbed summary of the arguments, who asked, and who can approve. Slack gets Approve/Deny buttons, Discord gets components, and every surface (including the portal) shows the typed form: `approve <id>` or `deny <id>`.
+
+Answers are handled by the inbound router before any channel or model sees them. The answerer is resolved through the same authenticated platform ids as requesters, and only the request's approvers can decide it: the approvers of the departments whose grants required approval, plus every admin. When several people direct the work, only approvers common to all of them qualify (admins always do). Anyone else gets a private refusal, which is logged. The first valid answer wins.
+
+Anything other than an explicit approval fails closed: a denial, no answer within `approval_timeout_secs`, the worker being cancelled while it waits, or a restart (requests still pending at startup are marked expired). Work with no conversation to ask in (detached or resumed workers) is refused. Every request and its outcome — who asked, who could approve, who decided, when, and a SHA-256 of the arguments — is kept in the agent's `tool_approvals` table.
+
+OpenCode workers receive no MCP servers, so the policy has nothing to gate there.
 
 ## What This Does NOT Do
 

@@ -196,6 +196,8 @@ pub struct AuthorizationConfig {
     /// Whether admin writes still need approval for classes that any
     /// department requires approval for.
     pub admin_requires_approval: bool,
+    /// How long a call waits for an approver before it is denied.
+    pub approval_timeout: std::time::Duration,
     pub departments: Vec<DepartmentDef>,
     pub tool_rules: Vec<ToolRuleDef>,
 }
@@ -207,6 +209,7 @@ impl Default for AuthorizationConfig {
             unattended_access: ToolAccess::Read,
             portal_human: None,
             admin_requires_approval: true,
+            approval_timeout: crate::approvals::DEFAULT_APPROVAL_TIMEOUT,
             departments: Vec::new(),
             tool_rules: Vec::new(),
         }
