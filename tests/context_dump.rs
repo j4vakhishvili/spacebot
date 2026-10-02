@@ -136,6 +136,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         memory_event_tx,
         tool_output_tx,
         sqlite_pool: db.sqlite.clone(),
+        approvals: std::sync::Arc::new(spacebot::approvals::ApprovalBroker::new(db.sqlite.clone())),
         messaging_manager: None,
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -315,6 +316,7 @@ async fn dump_channel_context() {
         turn_requesters: std::sync::Arc::new(std::sync::RwLock::new(vec![
             spacebot::authorization::Requester::Unattended,
         ])),
+        turn_origin: std::sync::Arc::new(std::sync::RwLock::new(None)),
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
@@ -582,6 +584,7 @@ async fn dump_all_contexts() {
         turn_requesters: std::sync::Arc::new(std::sync::RwLock::new(vec![
             spacebot::authorization::Requester::Unattended,
         ])),
+        turn_origin: std::sync::Arc::new(std::sync::RwLock::new(None)),
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();

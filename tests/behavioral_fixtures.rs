@@ -164,6 +164,7 @@ async fn bootstrap(instance_dir: &Path) -> anyhow::Result<AgentDeps> {
         memory_event_tx: buses.memory,
         tool_output_tx: buses.tool_output,
         sqlite_pool: db.sqlite.clone(),
+        approvals: Arc::new(spacebot::approvals::ApprovalBroker::new(db.sqlite.clone())),
         messaging_manager: None,
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
