@@ -11,6 +11,7 @@ pub mod chronicle;
 pub mod compactor;
 pub mod cortex;
 pub mod cortex_chat;
+pub mod delegation;
 pub mod inbound_relay;
 pub mod ingestion;
 #[cfg(test)]

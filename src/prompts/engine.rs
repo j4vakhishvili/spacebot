@@ -344,6 +344,10 @@ impl PromptEngine {
             "fragments/coalesce_hint",
             crate::prompts::text::get("fragments/coalesce_hint"),
         )?;
+        env.add_template(
+            "fragments/delegated_identity",
+            crate::prompts::text::get("fragments/delegated_identity"),
+        )?;
 
         Ok(Self {
             env: Arc::new(env),
@@ -779,6 +783,22 @@ impl PromptEngine {
     }
 
     /// Render the coalesce hint fragment for batched messages.
+    /// Worker prompt section for work delegated to another agent: who the
+    /// worker acts as, and that agent's identity files.
+    pub fn render_delegated_worker_identity(
+        &self,
+        agent_name: &str,
+        identity: &str,
+    ) -> Result<String> {
+        self.render(
+            "fragments/delegated_identity",
+            context! {
+                agent_name => agent_name,
+                identity => identity.trim(),
+            },
+        )
+    }
+
     pub fn render_coalesce_hint(
         &self,
         message_count: usize,

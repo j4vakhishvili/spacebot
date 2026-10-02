@@ -673,6 +673,10 @@ pub struct SpawnWorkerArgs {
     /// Used for audits and refinement of tasks that are not approved yet.
     #[serde(default)]
     pub task_context_number: Option<i64>,
+    /// Specialist agent to run this worker as. The worker uses that agent's
+    /// tools, skills and knowledge while this conversation keeps ownership.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// A task's execution plan resolved to concrete spawn parameters.
@@ -782,6 +786,39 @@ impl Tool for SpawnWorkerTool {
             "task_number": task_number_schema(),
             "task_context_number": task_context_number_schema()
         });
+
+        let delegation_targets =
+            crate::agent::delegation::available_targets(&self.state.deps).await;
+        if !delegation_targets.is_empty()
+            && let Some(obj) = properties.as_object_mut()
+        {
+            let listed = delegation_targets
+                .iter()
+                .map(|(id, name)| {
+                    if id == name {
+                        format!("`{id}`")
+                    } else {
+                        format!("`{id}` ({name})")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            obj.insert(
+                "agent".to_string(),
+                serde_json::json!({
+                    "type": "string",
+                    "enum": delegation_targets.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+                    "description": format!(
+                        "Run this worker as a specialist agent: {listed}. The worker gets that \
+                         specialist's tools, skills and knowledge, and its result comes back here \
+                         for you to answer with. Spawn one worker per specialist in parallel when \
+                         a request spans several. Omit to run the worker as yourself. Delegated \
+                         workers can't be interactive or OpenCode, and see only the task you \
+                         write, so include the context they need."
+                    )
+                }),
+            );
+        }
 
         if opencode_enabled && let Some(obj) = properties.as_object_mut() {
             obj.insert(
@@ -914,6 +951,34 @@ impl SpawnWorkerTool {
         }
         let is_opencode = effective_worker_type.as_deref() == Some("opencode");
 
+        let delegation = match args
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|agent| !agent.is_empty())
+        {
+            Some(agent) => {
+                if is_opencode {
+                    return Err(SpawnWorkerError(
+                        "delegated workers can't be OpenCode workers; omit worker_type".into(),
+                    ));
+                }
+                if args.interactive {
+                    return Err(SpawnWorkerError(
+                        "delegated workers can't be interactive; spawn it with interactive=false \
+                         and route follow-ups while it runs"
+                            .into(),
+                    ));
+                }
+                Some(
+                    crate::agent::delegation::resolve_target(&self.state.deps, agent)
+                        .await
+                        .map_err(SpawnWorkerError)?,
+                )
+            }
+            None => None,
+        };
+
         // Resolve working directory: the task plan's directory wins, then the
         // explicit argument, then project/worktree lookup.
         let resolved_directory = match planned.as_ref().and_then(|plan| plan.directory.clone()) {
@@ -942,6 +1007,7 @@ impl SpawnWorkerTool {
             task_context: planned.as_ref().map(|plan| plan.task_context.as_str()),
             origin_branch_id: self.branch_delegation.as_ref().map(|state| state.branch_id),
             requesters: branch_requesters.as_deref(),
+            delegation: delegation.as_ref(),
         };
 
         let prepared = if is_opencode {
@@ -1247,6 +1313,10 @@ impl SpawnWorkerTool {
                 }
             })
             .unwrap_or_default();
+        let worker_type_label = match &delegation {
+            Some(target) => format!("{worker_type_label} ({})", target.display_name),
+            None => worker_type_label.to_string(),
+        };
         let message = if effectively_interactive {
             format!(
                 "Interactive {worker_type_label} worker {worker_id} spawned for: {}. Route follow-ups with route_to_worker.{context_note}",

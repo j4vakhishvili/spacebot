@@ -743,6 +743,8 @@ pub struct WorkerTaskContext<'a> {
     /// Requesters captured when a branch forked. `None` uses the channel's
     /// current turn.
     pub requesters: Option<&'a [crate::authorization::Requester]>,
+    /// Run the worker as this agent instead of the channel's own.
+    pub delegation: Option<&'a crate::agent::delegation::DelegationTarget>,
 }
 
 /// Build pre-rendered project context for injection into worker/channel prompts.
@@ -902,6 +904,11 @@ pub async fn spawn_worker_from_state(
     worker_context: &WorkerContextMode,
     task_context: WorkerTaskContext<'_>,
 ) -> std::result::Result<PreparedWorkerSpawn, AgentError> {
+    if task_context.delegation.is_some() && interactive {
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "can't spawn worker: delegated workers can't be interactive"
+        )));
+    }
     let autonomy_run = state.autonomy_run();
     if state.kind == crate::agent::channel::ChannelKind::Autonomy && autonomy_run.is_none() {
         return Err(AgentError::Other(anyhow::anyhow!(
@@ -941,29 +948,43 @@ async fn spawn_worker_inner(
     worker_context: &WorkerContextMode,
     task_context: WorkerTaskContext<'_>,
 ) -> std::result::Result<PreparedWorkerSpawn, AgentError> {
-    let rc = &state.deps.runtime_config;
+    let delegation = task_context.delegation;
+    // A delegated worker is owned by this channel but works as the target
+    // agent: prompt, skills, routing, sandbox, MCP and memory all come from it.
+    let worker_deps = match delegation {
+        Some(target) => crate::agent::delegation::executor_deps(&state.deps, &target.deps),
+        None => state.deps.clone(),
+    };
+    let rc = &worker_deps.runtime_config;
     let prompt_engine = rc.prompts.load();
 
-    let worker_status_text = build_worker_status_text(rc.as_ref(), &state.deps.sandbox);
+    let worker_status_text = build_worker_status_text(rc.as_ref(), &worker_deps.sandbox);
 
-    let sandbox_enabled = state.deps.sandbox.mode_enabled();
-    let sandbox_containment_active = state.deps.sandbox.containment_active();
-    let sandbox_read_allowlist = state.deps.sandbox.prompt_read_allowlist();
-    let sandbox_write_allowlist = state.deps.sandbox.prompt_write_allowlist();
+    let sandbox_enabled = worker_deps.sandbox.mode_enabled();
+    let sandbox_containment_active = worker_deps.sandbox.containment_active();
+    let sandbox_read_allowlist = worker_deps.sandbox.prompt_read_allowlist();
+    let sandbox_write_allowlist = worker_deps.sandbox.prompt_write_allowlist();
     // Collect tool secret names so the worker template can list available credentials.
     let secrets_guard = rc.secrets.load();
     let tool_secret_names = match (*secrets_guard).as_ref() {
-        Some(store) => store.tool_secret_names(&state.deps.agent_id),
+        Some(store) => store.tool_secret_names(worker_deps.sandbox.agent_id()),
         None => Vec::new(),
     };
 
     let browser_config = (**rc.browser_config.load()).clone();
     let routing = rc.routing.load();
-    let model_name = state
-        .model_overrides
-        .resolve_model("worker")
-        .unwrap_or_else(|| routing.resolve(ProcessType::Worker, None))
-        .to_string();
+    // This conversation's model override is chosen for its own agent; a
+    // delegated worker runs on the target agent's worker routing.
+    let worker_model_override = match delegation {
+        Some(_) => None,
+        None => state
+            .model_overrides
+            .resolve_model("worker")
+            .map(String::from),
+    };
+    let model_name = worker_model_override
+        .clone()
+        .unwrap_or_else(|| routing.resolve(ProcessType::Worker, None).to_string());
     let tool_use_enforcement = rc.tool_use_enforcement.load();
     let project_context = build_project_context(&state.deps, &prompt_engine).await;
     let worker_system_prompt = prompt_engine
@@ -977,7 +998,7 @@ async fn spawn_worker_inner(
             &tool_secret_names,
             browser_config.persist_session,
             worker_status_text,
-            worker_context.wiki_write && state.deps.wiki_store.is_some(),
+            worker_context.wiki_write && worker_deps.wiki_store.is_some(),
             project_context,
         )
         .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
@@ -1015,9 +1036,19 @@ async fn spawn_worker_inner(
         "tool_use_enforcement",
     );
 
+    if let Some(target) = delegation {
+        let identity = rc.identity.load().render();
+        match prompt_engine.render_delegated_worker_identity(&target.display_name, &identity) {
+            Ok(section) => system_prompt.append_section("delegated_identity", &section),
+            Err(error) => {
+                tracing::warn!(%error, agent_id = %target.agent_id, "failed to render delegated worker identity");
+            }
+        }
+    }
+
     append_worker_memory_context(
         &mut system_prompt,
-        &state.deps,
+        &worker_deps,
         Some(&state.channel_id),
         worker_context.memory,
     )
@@ -1032,6 +1063,13 @@ async fn spawn_worker_inner(
             .unwrap_or_else(|| state.current_requesters()),
     );
     let autonomy_run = state.autonomy_run();
+    // The owner's status block and the worker record show which agent did
+    // the work; the worker's own prompt keeps the task as written.
+    let task = match delegation {
+        Some(target) => format!("[{}] {task}", target.display_name),
+        None => task.to_string(),
+    };
+    let task = task.as_str();
     let provenance = WorkerProvenance {
         origin_channel_id: Some(state.channel_id.clone()),
         origin_branch_id: task_context.origin_branch_id,
@@ -1040,16 +1078,38 @@ async fn spawn_worker_inner(
         autonomy_run_id: autonomy_run.as_ref().map(|run| run.run_id.clone()),
         spawning_process: crate::ProcessId::Channel(state.channel_id.clone()),
     };
-    let reservation = state
-        .deps
-        .process_control_registry
-        .reserve_worker(
-            worker_id,
-            &provenance,
-            **state.deps.runtime_config.max_concurrent_workers.load(),
-        )
-        .await
-        .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
+    // Delegated work counts against the target agent's worker limit, in its
+    // own admission bucket, so one busy specialist can't starve the others or
+    // this channel's own workers.
+    let reservation = match delegation {
+        Some(target) => {
+            state
+                .deps
+                .process_control_registry
+                .reserve_worker_in_scope(
+                    worker_id,
+                    &provenance,
+                    std::sync::Arc::from(format!(
+                        "delegate:{}:{}",
+                        state.channel_id, target.agent_id
+                    )),
+                    **worker_deps.runtime_config.max_concurrent_workers.load(),
+                )
+                .await
+        }
+        None => {
+            state
+                .deps
+                .process_control_registry
+                .reserve_worker(
+                    worker_id,
+                    &provenance,
+                    **state.deps.runtime_config.max_concurrent_workers.load(),
+                )
+                .await
+        }
+    }
+    .map_err(|error| AgentError::Other(anyhow::anyhow!(error)))?;
     let callback = reservation.callback_context();
     let initial_operation = WorkerOperationContext {
         operation_id: WorkerOperationId::new(),
@@ -1094,11 +1154,6 @@ async fn spawn_worker_inner(
         }
     };
 
-    let worker_model_override = state
-        .model_overrides
-        .resolve_model("worker")
-        .map(String::from);
-
     let worker = if interactive {
         let (worker, input_tx, inject_tx) = Worker::new_interactive(
             worker_id,
@@ -1107,7 +1162,7 @@ async fn spawn_worker_inner(
             Some(state.channel_id.clone()),
             &worker_task,
             system_prompt.clone(),
-            state.deps.clone(),
+            worker_deps.clone(),
             browser_config.clone(),
             state.screenshot_dir.clone(),
             brave_search_key.clone(),
@@ -1126,7 +1181,7 @@ async fn spawn_worker_inner(
             Some(state.channel_id.clone()),
             &worker_task,
             system_prompt,
-            state.deps.clone(),
+            worker_deps.clone(),
             browser_config,
             state.screenshot_dir.clone(),
             brave_search_key,
@@ -1140,6 +1195,11 @@ async fn spawn_worker_inner(
     };
     let (worker, input_tx, injection_tx) = worker;
     let worker = worker.with_requesters(requesters.clone());
+    let worker = match delegation {
+        Some(target) => worker.with_secret_scope(target.agent_id.clone()),
+        None => worker,
+    };
+    let delegated_secret_scope = delegation.map(|target| target.agent_id.clone());
     let transcript_snapshot = worker.transcript_snapshot();
     let (runtime_control, cancel_rx, terminal_notify) = WorkerRuntimeControl::new(
         transcript_snapshot.clone(),
@@ -1233,6 +1293,21 @@ async fn spawn_worker_inner(
     );
     let secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
     let (start_gate, start_rx) = WorkerStartGate::new();
+    // The supervisor scrubs with the owner's secrets; a delegated worker's
+    // outcome is scrubbed with the target agent's first, since that's whose
+    // secrets its sandbox could read.
+    let delegated_scrub_store = secrets_store.clone();
+    let worker_future = async move {
+        let outcome = worker.run().await;
+        match (delegated_secret_scope, delegated_scrub_store) {
+            (Some(scope), Some(store)) => outcome.map(|outcome| {
+                scrub_outcome(outcome, &|text: String| {
+                    crate::secrets::scrub::scrub_with_store(&text, &store, &scope)
+                })
+            }),
+            _ => outcome,
+        }
+    };
     let handle = spawn_worker_task(
         callback,
         state.deps.process_control_registry.clone(),
@@ -1248,7 +1323,7 @@ async fn spawn_worker_inner(
         secrets_store,
         Some(state.deps.task_store.clone()),
         "builtin",
-        worker.run().instrument(worker_span),
+        worker_future.instrument(worker_span),
     );
 
     if let Err(handle) = state

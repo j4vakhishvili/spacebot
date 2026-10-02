@@ -128,6 +128,27 @@ This gives the source channel's LLM awareness that a delegation is in progress w
 Each agent's system prompt includes an organization section derived from its links:
 
 ```markdown
+
+## Delegated Workers
+
+An agent can run a worker *as* one of its subordinates. Give `spawn_worker` an `agent` argument naming an agent this one links to hierarchically as the superior (`from` = this agent, `kind = "hierarchical"`):
+
+```toml
+[[links]]
+from = "main"
+to = "ads"
+direction = "one_way"
+kind = "hierarchical"
+```
+
+The worker is owned by the delegating channel. It appears in that channel's status block, takes `route` follow-ups and `cancel` there, and its result retriggers that channel, which writes the reply. Everything the worker can do comes from the target agent: its MCP servers, skills, worker model routing, workspace, sandbox and tool secrets, its memory (recall, and saving when the conversation's worker memory mode allows it), and its `SOUL.md` / `IDENTITY.md` / `ROLE.md` as a prompt section. The delegating channel's per-conversation model override does not apply.
+
+Concurrency counts against the target agent's `max_concurrent_workers`, in a bucket per delegating channel and target, so one busy specialist can't starve the others.
+
+The people who directed the work travel with it: the [department tool policy](/docs/permissions#department-tool-policy) checks the delegated worker's MCP calls against the original requesters, so delegating never raises access. The target agent's MCP set is the ceiling.
+
+Limits: delegation only goes down hierarchical links, never to peers or superiors. Delegated workers are builtin and fire-and-forget: they can't be interactive or OpenCode workers, though you can still route input to one while it runs. Token usage and the worker record are kept by the delegating agent. The spawn tool lists the agents available for delegation.
+
 ## Organization
 
 You are part of a multi-agent system. Here is your position:

@@ -314,6 +314,10 @@ pub struct Worker {
     /// Defaults to unattended, so a worker nobody attributed (resumed after a
     /// restart, detached system work) can read but never write.
     pub requesters: crate::authorization::RequesterSet,
+    /// Agent whose tool secrets this worker can see and must scrub from its
+    /// output. The owning agent, unless the worker was delegated to another
+    /// agent and runs with that agent's sandbox.
+    pub secret_scope: crate::AgentId,
 }
 
 impl Worker {
@@ -347,6 +351,7 @@ impl Worker {
         .with_worker_registry(callback, deps.process_control_registry.clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (inject_tx, inject_rx) = mpsc::channel(8);
+        let secret_scope = deps.agent_id.clone();
 
         let worker_wall_clock_timeout_secs = deps
             .runtime_config
@@ -386,6 +391,7 @@ impl Worker {
                 callback,
                 initial_operation,
                 requesters: crate::authorization::RequesterSet::unattended(),
+                secret_scope,
             },
             inject_tx,
         )
@@ -604,6 +610,13 @@ impl Worker {
     /// Act for these people instead of running unattended.
     pub fn with_requesters(mut self, requesters: crate::authorization::RequesterSet) -> Self {
         self.requesters = requesters;
+        self
+    }
+
+    /// Scrub output against another agent's tool secrets, for a worker that
+    /// runs with that agent's sandbox.
+    pub fn with_secret_scope(mut self, secret_scope: crate::AgentId) -> Self {
+        self.secret_scope = secret_scope;
         self
     }
 
@@ -1002,7 +1015,7 @@ impl Worker {
                 let scrubbed = if let Some(store) =
                     self.deps.runtime_config.secrets.load().as_ref().as_ref()
                 {
-                    crate::secrets::scrub::scrub_with_store(&result, store, &self.deps.agent_id)
+                    crate::secrets::scrub::scrub_with_store(&result, store, &self.secret_scope)
                 } else {
                     result.clone()
                 };
@@ -1165,7 +1178,7 @@ impl Worker {
                             crate::secrets::scrub::scrub_with_store(
                                 &response,
                                 store,
-                                &self.deps.agent_id,
+                                &self.secret_scope,
                             )
                         } else {
                             response

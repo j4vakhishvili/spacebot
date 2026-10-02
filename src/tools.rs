@@ -1479,6 +1479,9 @@ pub fn create_worker_tool_server(
     interactive: bool,
 ) -> ToolServerHandle {
     let worker_id = callback.worker_id;
+    // Tool secrets the sandbox injects belong to the executing agent, which
+    // differs from `agent_id` when the worker was delegated.
+    let secret_scope = sandbox.agent_id().clone();
     let mut server = ToolServer::new()
         .tool(
             ShellTool::new(workspace.clone(), sandbox.clone()).with_streaming(
@@ -1512,7 +1515,7 @@ pub fn create_worker_tool_server(
                 process_control_registry,
             );
             if let Some(store) = runtime_config.secrets.load().as_ref() {
-                status_tool = status_tool.with_tool_secrets(store.tool_secret_pairs(&agent_id));
+                status_tool = status_tool.with_tool_secrets(store.tool_secret_pairs(&secret_scope));
             }
             status_tool
         })
@@ -1521,7 +1524,7 @@ pub fn create_worker_tool_server(
     server = register_file_tools(server, workspace, sandbox);
 
     if let Some(store) = runtime_config.secrets.load().as_ref() {
-        server = server.tool(SecretSetTool::new(store.clone(), agent_id.clone()));
+        server = server.tool(SecretSetTool::new(store.clone(), secret_scope));
     }
 
     if browser_config.enabled {

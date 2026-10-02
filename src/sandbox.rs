@@ -270,6 +270,11 @@ impl Sandbox {
     }
 
     /// True when sandbox mode is enabled in config.
+    /// The agent whose tool secrets this sandbox injects into subprocesses.
+    pub fn agent_id(&self) -> &crate::AgentId {
+        &self.agent_id
+    }
+
     pub fn mode_enabled(&self) -> bool {
         self.config.load().mode == SandboxMode::Enabled
     }
