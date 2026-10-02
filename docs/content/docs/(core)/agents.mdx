@@ -163,6 +163,9 @@ bio = "Founder of Spacedrive. Works on product direction and architecture."
 | `display_name` | No       | Human-readable name.                              |
 | `role`         | No       | Position or title.                                |
 | `bio`          | No       | Short description.                                |
+| `slack_id`, `discord_id`, `telegram_id`, `email` | No | Platform identities used to recognise this person in conversations. |
+| `departments`  | No       | Departments whose [tool policy](/docs/permissions#department-tool-policy) applies to this person. |
+| `admin`        | No       | Full MCP access and approval rights under the department tool policy. |
 
 If no `[[humans]]` section exists, a default `admin` human is created automatically.
 
@@ -176,7 +179,7 @@ direction = "two_way"
 kind = "hierarchical"
 ```
 
-Humans don't have workspaces, databases, or messaging tools. They exist to model the org structure and will later map to dashboard auth and permissions.
+Humans don't have workspaces, databases, or messaging tools. They model the org structure, and with the [department tool policy](/docs/permissions#department-tool-policy) they also decide which MCP tools an agent may use on a person's behalf.
 
 ### HUMAN.md
 

@@ -1,5 +1,6 @@
 //! MCP tool adapters that proxy calls to external MCP servers.
 
+use crate::authorization::{GateDecision, ToolGate, ToolHints};
 use crate::mcp::McpConnection;
 use crate::tools::truncate_output;
 
@@ -15,7 +16,12 @@ pub struct McpToolAdapter {
     tool_name: String,
     description: String,
     input_schema: Value,
+    hints: ToolHints,
     connection: Arc<McpConnection>,
+    /// Department policy check for this worker's requesters. Checked against
+    /// the exact server and tool pair, never the flattened model-facing name,
+    /// which can collide across servers.
+    gate: Option<ToolGate>,
 }
 
 impl McpToolAdapter {
@@ -30,13 +36,36 @@ impl McpToolAdapter {
             .map(|description| description.into_owned())
             .unwrap_or_default();
 
+        let hints = ToolHints::from_annotations(tool.annotations.as_ref());
+
         Self {
             server_name,
             tool_name: tool.name.into_owned(),
             description,
             input_schema,
+            hints,
             connection,
+            gate: None,
         }
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
+    pub fn hints(&self) -> ToolHints {
+        self.hints
+    }
+
+    /// Check every call against the department policy before it reaches the
+    /// server.
+    pub fn with_gate(mut self, gate: ToolGate) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     fn namespaced_name(&self) -> String {
@@ -106,6 +135,38 @@ impl Tool for McpToolAdapter {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if let Some(gate) = &self.gate {
+            match gate.check(&self.server_name, &self.tool_name, self.hints, Some(&args)) {
+                GateDecision::Allow => {}
+                GateDecision::Deny { reason } => {
+                    tracing::info!(
+                        server = %self.server_name,
+                        tool = %self.tool_name,
+                        requesters = ?gate.requesters().snapshot(),
+                        "mcp call refused by department policy"
+                    );
+                    return Err(McpToolError(format!("Not permitted: {reason}")));
+                }
+                GateDecision::RequireApproval { class } => {
+                    // Approvals are not wired yet, so a gated call fails
+                    // closed rather than running unapproved.
+                    tracing::info!(
+                        server = %self.server_name,
+                        tool = %self.tool_name,
+                        class = %class,
+                        requesters = ?gate.requesters().snapshot(),
+                        "mcp call needs approval; refused until approvals are available"
+                    );
+                    return Err(McpToolError(format!(
+                        "Not run: `{}` on `{}` is a {class} and needs approval from an \
+                         approver, which this assistant can't request yet. Ask an approver \
+                         to make this change directly.",
+                        self.tool_name, self.server_name
+                    )));
+                }
+            }
+        }
+
         let result = self
             .connection
             .call_tool(&self.tool_name, args)

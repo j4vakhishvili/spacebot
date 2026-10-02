@@ -310,6 +310,10 @@ pub struct Worker {
     pub transcript_snapshot: WorkerTranscriptSnapshot,
     pub callback: WorkerCallbackContext,
     pub initial_operation: Option<WorkerOperationContext>,
+    /// People this worker acts for. Every MCP call is checked against them.
+    /// Defaults to unattended, so a worker nobody attributed (resumed after a
+    /// restart, detached system work) can read but never write.
+    pub requesters: crate::authorization::RequesterSet,
 }
 
 impl Worker {
@@ -381,6 +385,7 @@ impl Worker {
                 transcript_snapshot: new_worker_transcript_snapshot(),
                 callback,
                 initial_operation,
+                requesters: crate::authorization::RequesterSet::unattended(),
             },
             inject_tx,
         )
@@ -596,6 +601,46 @@ impl Worker {
         self.transcript_snapshot.clone()
     }
 
+    /// Act for these people instead of running unattended.
+    pub fn with_requesters(mut self, requesters: crate::authorization::RequesterSet) -> Self {
+        self.requesters = requesters;
+        self
+    }
+
+    /// The agent's MCP tools as this worker may see them: tools its
+    /// requesters can never use are left out, and the rest check each call
+    /// against the live policy.
+    async fn gated_mcp_tools(&self) -> Vec<crate::tools::mcp::McpToolAdapter> {
+        let mcp_tools = self.deps.mcp_manager.get_tools().await;
+        let gate = crate::authorization::ToolGate::new(
+            self.deps.authorization.clone(),
+            self.deps.humans.clone(),
+            self.requesters.clone(),
+        );
+        // The gate is attached even while the policy is inactive, so enabling
+        // departments by hot reload also covers workers already running.
+        if !gate.is_enabled() {
+            return mcp_tools
+                .into_iter()
+                .map(|tool| tool.with_gate(gate.clone()))
+                .collect();
+        }
+        let offered_count = mcp_tools.len();
+        let gated = mcp_tools
+            .into_iter()
+            .filter(|tool| gate.is_offered(tool.server_name(), tool.tool_name(), tool.hints()))
+            .map(|tool| tool.with_gate(gate.clone()))
+            .collect::<Vec<_>>();
+        tracing::info!(
+            worker_id = %self.id,
+            requesters = ?self.requesters.snapshot(),
+            offered = gated.len(),
+            withheld = offered_count - gated.len(),
+            "mcp tools filtered by department policy"
+        );
+        gated
+    }
+
     /// Run the worker's LLM agent loop until completion.
     ///
     /// Runs in segments of 25 turns. After each segment, checks context usage
@@ -618,7 +663,7 @@ impl Worker {
 
         tracing::info!(worker_id = %self.id, task = %self.task, "worker starting");
 
-        let mcp_tools = self.deps.mcp_manager.get_tools().await;
+        let mcp_tools = self.gated_mcp_tools().await;
         let tool_call_registry = crate::tools::ToolCallRegistry::default();
         self.hook = self
             .hook

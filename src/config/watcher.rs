@@ -51,6 +51,7 @@ pub fn spawn_file_watcher(
     llm_manager: Arc<crate::llm::LlmManager>,
     agent_links: Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
     agent_humans: Arc<arc_swap::ArcSwap<Vec<crate::config::HumanDef>>>,
+    agent_authorization: Arc<arc_swap::ArcSwap<crate::config::AuthorizationConfig>>,
 ) -> FileWatcherHandle {
     use notify::{Event, RecursiveMode, Watcher};
     use std::time::Duration;
@@ -237,6 +238,13 @@ pub fn spawn_file_watcher(
 
                 agent_humans.store(Arc::new(config.humans.clone()));
                 tracing::info!("agent humans reloaded ({} entries)", config.humans.len());
+
+                agent_authorization.store(Arc::new(config.authorization.clone()));
+                tracing::info!(
+                    departments = config.authorization.departments.len(),
+                    tool_rules = config.authorization.tool_rules.len(),
+                    "authorization policy reloaded"
+                );
 
                 if let Some(ref perms) = discord_permissions
                     && let Some(discord_config) = &config.messaging.discord

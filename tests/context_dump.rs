@@ -144,6 +144,9 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         )),
         agent_names: Arc::new(std::collections::HashMap::new()),
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(config.humans.clone())),
+        authorization: Arc::new(arc_swap::ArcSwap::from_pointee(
+            config.authorization.clone(),
+        )),
         process_control_registry: Arc::new(
             spacebot::agent::process_control::ProcessControlRegistry::new(),
         ),
@@ -309,6 +312,9 @@ async fn dump_channel_context() {
         human_anchor_cache: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        turn_requesters: std::sync::Arc::new(std::sync::RwLock::new(vec![
+            spacebot::authorization::Requester::Unattended,
+        ])),
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
@@ -573,6 +579,9 @@ async fn dump_all_contexts() {
         human_anchor_cache: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        turn_requesters: std::sync::Arc::new(std::sync::RwLock::new(vec![
+            spacebot::authorization::Requester::Unattended,
+        ])),
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();

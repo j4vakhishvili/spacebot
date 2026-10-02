@@ -559,8 +559,9 @@ async fn spawn_branch(
     };
 
     let branch_id = crate::BranchId::new_v4();
-    let branch_delegation = matches!(&profile, BranchToolProfile::Default)
-        .then(|| Arc::new(BranchDelegationState::new(branch_id)));
+    let branch_delegation = matches!(&profile, BranchToolProfile::Default).then(|| {
+        Arc::new(BranchDelegationState::new(branch_id).with_requesters(state.current_requesters()))
+    });
     let tool_server = crate::tools::create_branch_tool_server(
         Some(state.clone()),
         state.deps.agent_id.clone(),
@@ -739,6 +740,9 @@ fn worker_task_prompt(task: &str, task_context: Option<&str>) -> String {
 pub struct WorkerTaskContext<'a> {
     pub task_context: Option<&'a str>,
     pub origin_branch_id: Option<BranchId>,
+    /// Requesters captured when a branch forked. `None` uses the channel's
+    /// current turn.
+    pub requesters: Option<&'a [crate::authorization::Requester]>,
 }
 
 /// Build pre-rendered project context for injection into worker/channel prompts.
@@ -1021,6 +1025,12 @@ async fn spawn_worker_inner(
 
     let worker_task = worker_task_prompt(task, task_context.task_context);
     let worker_id = uuid::Uuid::new_v4();
+    let requesters = crate::authorization::RequesterSet::new(
+        task_context
+            .requesters
+            .map(<[_]>::to_vec)
+            .unwrap_or_else(|| state.current_requesters()),
+    );
     let autonomy_run = state.autonomy_run();
     let provenance = WorkerProvenance {
         origin_channel_id: Some(state.channel_id.clone()),
@@ -1129,6 +1139,7 @@ async fn spawn_worker_inner(
         (worker, None, Some(inject_tx))
     };
     let (worker, input_tx, injection_tx) = worker;
+    let worker = worker.with_requesters(requesters.clone());
     let transcript_snapshot = worker.transcript_snapshot();
     let (runtime_control, cancel_rx, terminal_notify) = WorkerRuntimeControl::new(
         transcript_snapshot.clone(),
@@ -1137,6 +1148,7 @@ async fn spawn_worker_inner(
         injection_tx,
         Some(state.process_run_logger.clone()),
     );
+    let runtime_control = runtime_control.with_requesters(requesters);
     let admission = state
         .deps
         .process_control_registry

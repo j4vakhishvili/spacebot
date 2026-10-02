@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod api;
 pub mod auth;
+pub mod authorization;
 pub mod commands;
 pub mod config;
 pub mod conversation;
@@ -561,6 +562,9 @@ pub struct AgentDeps {
     /// Org-level human definitions (hot-reloadable). Used by `build_org_context()`
     /// to surface human display names, roles, and descriptions in agent prompts.
     pub humans: Arc<arc_swap::ArcSwap<Vec<config::HumanDef>>>,
+    /// Department tool policy (hot-reloadable). Workers check every MCP call
+    /// against it for the people who directed them.
+    pub authorization: Arc<arc_swap::ArcSwap<config::AuthorizationConfig>>,
     pub process_control_registry: Arc<agent::process_control::ProcessControlRegistry>,
     /// Sender for injecting messages into channels from outside the normal
     /// inbound message flow (e.g. cross-agent task completion notifications).

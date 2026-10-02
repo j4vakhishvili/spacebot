@@ -68,6 +68,8 @@ pub struct Config {
     /// `min(ceiling, agent level)` — the ceiling caps the per-agent dial
     /// without overwriting it. `Act` (the default) applies no cap.
     pub autonomy_ceiling: AutonomyLevel,
+    /// Department tool policy. Inactive until departments are configured.
+    pub authorization: AuthorizationConfig,
 }
 
 /// Instance-wide memory maintenance scheduler.
@@ -147,6 +149,149 @@ pub struct HumanDef {
     pub slack_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// Departments whose tool policy applies to this person's requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub departments: Vec<String>,
+    /// Admins get full access on every MCP server and can approve any gated
+    /// call. Deny-class tools stay refused for them too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admin: bool,
+}
+
+/// How much a department may do on an MCP server. Ordered so the most
+/// permissive grant wins when a person belongs to several departments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAccess {
+    None,
+    Read,
+    Full,
+}
+
+impl ToolAccess {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "read" => Some(Self::Read),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
+/// Instance-wide department tool policy, from `[authorization]`,
+/// `[[departments]]` and `[[tool_rules]]`.
+///
+/// The policy is inactive (every MCP tool is allowed, as before) until at
+/// least one department is configured.
+#[derive(Debug, Clone)]
+pub struct AuthorizationConfig {
+    /// Department applied to senders that resolve to no known human.
+    pub default_department: Option<String>,
+    /// Access for work with no human requester: cron, autonomy, resumed workers.
+    pub unattended_access: ToolAccess,
+    /// Human that portal messages act as. Portal sender names are supplied by
+    /// the client, so they never select a human on their own.
+    pub portal_human: Option<String>,
+    /// Whether admin writes still need approval for classes that any
+    /// department requires approval for.
+    pub admin_requires_approval: bool,
+    pub departments: Vec<DepartmentDef>,
+    pub tool_rules: Vec<ToolRuleDef>,
+}
+
+impl Default for AuthorizationConfig {
+    fn default() -> Self {
+        Self {
+            default_department: None,
+            unattended_access: ToolAccess::Read,
+            portal_human: None,
+            admin_requires_approval: true,
+            departments: Vec::new(),
+            tool_rules: Vec::new(),
+        }
+    }
+}
+
+impl AuthorizationConfig {
+    pub fn is_enabled(&self) -> bool {
+        !self.departments.is_empty()
+    }
+
+    pub fn department(&self, id: &str) -> Option<&DepartmentDef> {
+        self.departments
+            .iter()
+            .find(|department| department.id == id)
+    }
+}
+
+/// A permission group. Independent of agents: a department decides what its
+/// members may make any agent do.
+#[derive(Debug, Clone)]
+pub struct DepartmentDef {
+    pub id: String,
+    /// Human ids allowed to approve this department's gated calls, in
+    /// addition to admins.
+    pub approvers: Vec<String>,
+    pub policies: Vec<DepartmentPolicy>,
+}
+
+/// One access grant inside a department. `servers` and `tools` are glob
+/// patterns (`*` wildcard); an empty `tools` list covers every tool.
+#[derive(Debug, Clone)]
+pub struct DepartmentPolicy {
+    pub servers: Vec<String>,
+    pub tools: Vec<String>,
+    pub access: ToolAccess,
+    /// Write classes that need approval under this grant. `*` covers every
+    /// write.
+    pub require_approval: Vec<String>,
+}
+
+/// Explicit classification for MCP tools. The first matching rule decides a
+/// tool's class; tools no rule matches fall back to MCP annotations and then
+/// to the verb heuristic.
+#[derive(Debug, Clone)]
+pub struct ToolRuleDef {
+    pub servers: Vec<String>,
+    /// Tool-name globs. Empty matches every tool on the servers.
+    pub tools: Vec<String>,
+    /// When set, the tool name must contain one of these words.
+    pub verbs: Vec<String>,
+    /// When set, the tool name must contain one of these substrings.
+    pub entities: Vec<String>,
+    /// Arguments that make a matching call a dry run, which is then a read.
+    /// Values compare strictly, so `"true"` does not match `true`.
+    pub unless_args: Vec<(String, serde_json::Value)>,
+    pub class: ToolRuleClass,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolRuleClass {
+    Read,
+    Write,
+    Deny,
+    /// A write with a name that department policies can require approval for.
+    Named(String),
+}
+
+impl ToolRuleClass {
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        match value.to_ascii_lowercase().as_str() {
+            "" => None,
+            "read" => Some(Self::Read),
+            "write" => Some(Self::Write),
+            "deny" => Some(Self::Deny),
+            _ if value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_') =>
+            {
+                Some(Self::Named(value.to_string()))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// A visual group definition for the topology UI.

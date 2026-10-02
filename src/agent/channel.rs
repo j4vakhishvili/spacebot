@@ -523,9 +523,29 @@ pub struct ChannelState {
     /// Current autonomy epoch. The slot survives between epochs while each
     /// generation gets a fresh handle and completion contract.
     pub autonomy_run: Option<crate::agent::autonomy::AutonomyRunSlot>,
+    /// The people the current turn acts for, resolved for the department tool
+    /// policy. Workers spawned in the turn inherit them. System retriggers
+    /// keep the previous turn's requesters, as they continue its work.
+    pub turn_requesters: Arc<std::sync::RwLock<Vec<crate::authorization::Requester>>>,
 }
 
 impl ChannelState {
+    /// Snapshot of the people the current turn acts for.
+    pub fn current_requesters(&self) -> Vec<crate::authorization::Requester> {
+        match self.turn_requesters.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn set_turn_requesters(&self, requesters: Vec<crate::authorization::Requester>) {
+        let mut guard = match self.turn_requesters.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = requesters;
+    }
+
     pub fn autonomy_run(&self) -> Option<crate::agent::autonomy::AutonomyRunHandle> {
         self.autonomy_run
             .as_ref()
@@ -1007,6 +1027,9 @@ impl Channel {
             )),
             autonomy_run,
             human_anchor_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            turn_requesters: Arc::new(std::sync::RwLock::new(vec![
+                crate::authorization::Requester::Unattended,
+            ])),
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -2451,6 +2474,13 @@ impl Channel {
         if let Some(last_real) = messages.iter().rev().find(|m| m.source != "system") {
             self.current_inbound = Some(last_real.clone());
         }
+        if let Some(requesters) = crate::authorization::resolve_batch_requesters(
+            &messages,
+            &self.deps.humans.load(),
+            &self.deps.authorization.load(),
+        ) {
+            self.state.set_turn_requesters(requesters);
+        }
 
         // Time and the coalesce hint live on the user message envelope, not
         // the system prompt: the prompt must stay byte-stable across turns,
@@ -2517,6 +2547,12 @@ impl Channel {
         // System retrigger messages keep the previous inbound target.
         if message.source != "system" {
             self.current_inbound = Some(message.clone());
+            self.state
+                .set_turn_requesters(vec![crate::authorization::resolve_requester(
+                    &message,
+                    &self.deps.humans.load(),
+                    &self.deps.authorization.load(),
+                )]);
         }
 
         tracing::info!(
@@ -5205,6 +5241,8 @@ mod tests {
             telegram_id: None,
             slack_id: None,
             email: None,
+            departments: Vec::new(),
+            admin: false,
         }];
         let message = InboundMessage {
             id: "message-1".to_string(),

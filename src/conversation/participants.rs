@@ -228,6 +228,8 @@ mod tests {
             telegram_id: None,
             slack_id: None,
             email: None,
+            departments: Vec::new(),
+            admin: false,
         }];
 
         track_active_participant(&mut participants, &humans, &message);
@@ -351,6 +353,8 @@ mod tests {
             telegram_id: None,
             slack_id: None,
             email: None,
+            departments: Vec::new(),
+            admin: false,
         }];
 
         track_active_participant(&mut participants, &humans, &message);

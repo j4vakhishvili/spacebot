@@ -285,6 +285,67 @@ network_allow_private = false              # true | false | [specific IPs]
 
 Default when no `[permissions]` block exists: all tools return permission denied with a message directing the user to configure permissions. This forces explicit configuration rather than defaulting to either extreme.
 
+## Department Tool Policy
+
+The per-agent permissions above restrict what an agent can do. The department policy restricts what a **person** can make any agent do with MCP tools. Access follows the requester, not the agent: every worker records the people who directed it, and each MCP call is checked against them.
+
+The policy is inactive until at least one `[[departments]]` entry exists. Without departments, every MCP tool is available as before.
+
+```toml
+[authorization]
+default_department = "everyone"   # senders that match no [[humans]] entry
+unattended = "read"               # cron, autonomy, workers resumed after a restart: "none" | "read"
+portal_human = "jamie"            # optional: who portal messages act as
+admin_requires_approval = true    # admins still hit approval classes (default true)
+
+[[departments]]
+id = "everyone"
+[[departments.policy]]
+servers = ["*"]
+access = "read"                   # "none" | "read" | "full"
+
+[[departments]]
+id = "advertising"
+approvers = ["jamie"]             # human ids that may approve this department's gated calls
+[[departments.policy]]
+servers = ["agmcp-gtm"]           # first matching policy in a department wins
+access = "read"
+[[departments.policy]]
+servers = ["agmcp-*"]
+access = "full"
+require_approval = ["campaign_mutation"]   # "*" covers every write
+
+[[tool_rules]]
+servers = ["agmcp-*"]
+verbs = ["create", "update", "delete", "pause"]
+entities = ["campaign", "budget"]
+unless_args = { validateOnly = true }      # a matching dry run counts as a read
+class = "campaign_mutation"                # "read" | "write" | "deny" | a named write class
+
+[[tool_rules]]
+servers = ["instantly"]
+tools = ["api_keys_*"]
+class = "deny"                             # refused for everyone, admins included
+
+[[humans]]
+id = "jamie"
+slack_id = "U01234567"
+departments = ["advertising"]
+admin = false
+```
+
+**Who is asking.** A message resolves to a human only through an authenticated platform id (`slack_id`, `discord_id`, `telegram_id`). Portal and webhook senders are chosen by the client, so they never select a human; portal messages act as `portal_human` when it is set. Senders that resolve to nobody get `default_department`. Cron, autonomy and system work is unattended.
+
+**Requesters follow the work.** A worker inherits the people of the channel turn that spawned it, including turns that batch several senders. A branch keeps the people of the turn it forked from. When someone routes follow-up input to a running worker, they join its requesters. Access is the most restrictive outcome across all requesters, so a follow-up from someone with less access narrows the worker and one with more access never widens it.
+
+**Classification.** Each call is a read, a write (optionally a named class), or denied. The first matching `[[tool_rules]]` entry decides; otherwise the server's `readOnlyHint` / `destructiveHint` annotations; otherwise the tool name: any write word (`create`, `update`, `delete`, `send`, …) makes it a write, a leading read verb (`list`, `get`, `search`, `run`, …) makes it a read, and anything else is a write. Rules match on the MCP server and tool names, never on the flattened model-facing name.
+
+**Access.** Within a department the first matching policy applies. Across a person's departments the most permissive grant wins; a write needs approval only when every `full` grant for it requires approval for its class. Admins get full access everywhere, still subject to approval classes and to `deny` rules.
+
+**Enforcement.** Unlike the per-agent permissions above, tools a worker's requesters can never use are left out of the worker entirely, which also keeps them out of the model's context. Everything else is checked again on every call against the live policy, and a refusal comes back as a tool error that explains who lacks access. Config changes hot-reload.
+
+Approval prompts are not implemented yet: a call that needs approval is refused with an explanation instead of running unapproved. OpenCode workers receive no MCP servers, so the policy has nothing to gate there.
+
 ## What This Does NOT Do
 
 **OS-level sandboxing.** The permissions system is application-level -- it controls which tools the LLM can use and what paths it's allowed to access. OS-level containment is handled by the [Sandbox](/docs/sandbox), which operates independently when sandboxing is enabled; exact primitives vary by mode and backend/platform. Provisioned instances (spacebot.sh) also run in isolated containers. The permissions system and sandbox are complementary layers.

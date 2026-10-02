@@ -2311,4 +2311,176 @@ tool_use_enforcement = ["gemini", "deepseek"]
                 .should_inject("anthropic/claude-sonnet-4")
         );
     }
+
+    const AUTHORIZATION_TOML: &str = r#"
+[authorization]
+default_department = "everyone"
+portal_human = "operator"
+
+[[departments]]
+id = "everyone"
+[[departments.policy]]
+servers = ["*"]
+access = "read"
+
+[[departments]]
+id = "advertising"
+approvers = ["lead"]
+[[departments.policy]]
+servers = ["agmcp-gtm"]
+access = "read"
+[[departments.policy]]
+servers = ["agmcp-*"]
+access = "full"
+require_approval = ["campaign_mutation"]
+
+[[tool_rules]]
+servers = ["agmcp-*"]
+verbs = ["create", "update"]
+entities = ["campaign", "budget"]
+unless_args = { validateOnly = true }
+class = "campaign_mutation"
+
+[[tool_rules]]
+servers = ["instantly"]
+tools = ["api_keys_*"]
+class = "deny"
+
+[[humans]]
+id = "operator"
+admin = true
+
+[[humans]]
+id = "lead"
+slack_id = "ULEAD"
+departments = ["advertising"]
+"#;
+
+    fn build(toml: &str) -> std::result::Result<Config, crate::error::ConfigError> {
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        Config::from_toml(parsed, PathBuf::from(".")).map_err(|error| match error {
+            crate::error::Error::Config(config_error) => *config_error,
+            other => panic!("unexpected error: {other}"),
+        })
+    }
+
+    fn expect_invalid(toml: &str, fragment: &str) {
+        match build(toml) {
+            Err(crate::error::ConfigError::Invalid(message)) => {
+                assert!(message.contains(fragment), "`{message}` lacks `{fragment}`")
+            }
+            Err(other) => panic!("expected an invalid-config error, got {other}"),
+            Ok(_) => panic!("expected an invalid-config error mentioning `{fragment}`"),
+        }
+    }
+
+    #[test]
+    fn authorization_parses_departments_rules_and_humans() {
+        let config = build(AUTHORIZATION_TOML).expect("failed to build Config");
+        let authorization = &config.authorization;
+        assert!(authorization.is_enabled());
+        assert_eq!(
+            authorization.default_department.as_deref(),
+            Some("everyone")
+        );
+        assert_eq!(authorization.portal_human.as_deref(), Some("operator"));
+        assert_eq!(authorization.unattended_access, ToolAccess::Read);
+        assert!(authorization.admin_requires_approval);
+
+        let advertising = authorization.department("advertising").unwrap();
+        assert_eq!(advertising.approvers, vec!["lead".to_string()]);
+        assert_eq!(advertising.policies.len(), 2);
+        assert_eq!(advertising.policies[1].access, ToolAccess::Full);
+        assert_eq!(
+            advertising.policies[1].require_approval,
+            vec!["campaign_mutation".to_string()]
+        );
+
+        assert_eq!(authorization.tool_rules.len(), 2);
+        assert_eq!(
+            authorization.tool_rules[0].class,
+            ToolRuleClass::Named("campaign_mutation".into())
+        );
+        assert_eq!(
+            authorization.tool_rules[0].unless_args,
+            vec![("validateOnly".to_string(), serde_json::json!(true))]
+        );
+        assert_eq!(authorization.tool_rules[1].class, ToolRuleClass::Deny);
+
+        let lead = config
+            .humans
+            .iter()
+            .find(|human| human.id == "lead")
+            .unwrap();
+        assert_eq!(lead.departments, vec!["advertising".to_string()]);
+        assert!(!lead.admin);
+        assert!(
+            config
+                .humans
+                .iter()
+                .any(|human| human.id == "operator" && human.admin)
+        );
+    }
+
+    #[test]
+    fn authorization_is_inactive_without_departments() {
+        let config = build("").expect("failed to build Config");
+        assert!(!config.authorization.is_enabled());
+        assert!(
+            config
+                .humans
+                .iter()
+                .all(|human| human.departments.is_empty())
+        );
+    }
+
+    #[test]
+    fn authorization_rejects_dangling_references() {
+        expect_invalid(
+            &AUTHORIZATION_TOML.replace(
+                r#"departments = ["advertising"]"#,
+                r#"departments = ["advertsing"]"#,
+            ),
+            "department `advertsing`, which is not defined",
+        );
+        expect_invalid(
+            &AUTHORIZATION_TOML.replace(r#"approvers = ["lead"]"#, r#"approvers = ["nobody"]"#),
+            "approver `nobody`",
+        );
+        expect_invalid(
+            &AUTHORIZATION_TOML.replace(
+                r#"default_department = "everyone""#,
+                r#"default_department = "all""#,
+            ),
+            "default_department `all`",
+        );
+        expect_invalid(
+            &AUTHORIZATION_TOML
+                .replace(r#"portal_human = "operator""#, r#"portal_human = "ghost""#),
+            "portal_human `ghost`",
+        );
+    }
+
+    #[test]
+    fn authorization_rejects_bad_values() {
+        expect_invalid(
+            &AUTHORIZATION_TOML.replace(r#"access = "read""#, r#"access = "write""#),
+            "policy access must be one of none, read, full",
+        );
+        expect_invalid(
+            &AUTHORIZATION_TOML.replace(r#"class = "deny""#, r#"class = "not allowed""#),
+            "tool_rules class",
+        );
+        expect_invalid(
+            &AUTHORIZATION_TOML.replace(
+                "[authorization]\n",
+                "[authorization]\nunattended = \"full\"\n",
+            ),
+            "authorization.unattended can't be `full`",
+        );
+        expect_invalid(
+            &format!("{AUTHORIZATION_TOML}\n[[departments]]\nid = \"everyone\"\n"),
+            "department `everyone` is defined more than once",
+        );
+    }
 }

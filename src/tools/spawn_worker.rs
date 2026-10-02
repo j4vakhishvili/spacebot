@@ -24,6 +24,9 @@ use tracing::Instrument as _;
 pub struct BranchDelegationState {
     branch_id: crate::BranchId,
     delegation: Mutex<Option<BranchDelegation>>,
+    /// The people the channel turn acted for when the branch forked. A branch
+    /// runs after its turn ends, so it can't read the channel's live slot.
+    requesters: Option<Vec<crate::authorization::Requester>>,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +41,13 @@ impl BranchDelegationState {
         Self {
             branch_id,
             delegation: Mutex::new(None),
+            requesters: None,
         }
+    }
+
+    pub fn with_requesters(mut self, requesters: Vec<crate::authorization::Requester>) -> Self {
+        self.requesters = Some(requesters);
+        self
     }
 
     pub async fn delegation(&self) -> Option<BranchDelegation> {
@@ -925,9 +934,14 @@ impl SpawnWorkerTool {
             .filter(|plan| plan.bind_task)
             .map(|plan| plan.required_skills.iter().map(String::as_str).collect())
             .unwrap_or_default();
+        let branch_requesters = self
+            .branch_delegation
+            .as_ref()
+            .and_then(|state| state.requesters.clone());
         let worker_task_context = WorkerTaskContext {
             task_context: planned.as_ref().map(|plan| plan.task_context.as_str()),
             origin_branch_id: self.branch_delegation.as_ref().map(|state| state.branch_id),
+            requesters: branch_requesters.as_deref(),
         };
 
         let prepared = if is_opencode {

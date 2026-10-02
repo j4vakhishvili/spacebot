@@ -11,16 +11,17 @@ use super::providers::{
 };
 use super::toml_schema::*;
 use super::{
-    AgentConfig, ApiConfig, ApiType, AutonomyConfig, AutonomyLevel, Binding, BrowserConfig,
-    ChannelConfig, ChronicleConfig, ClosePolicy, CoalesceConfig, CompactionConfig, Config,
-    CortexConfig, CronDef, DefaultsConfig, DiscordConfig, DiscordInstanceConfig, EmailConfig,
-    EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig, LinkDef, LlmConfig, MattermostConfig,
-    MattermostInstanceConfig, McpServerConfig, McpTransport, MemoryJanitorConfig,
-    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
+    AgentConfig, ApiConfig, ApiType, AuthorizationConfig, AutonomyConfig, AutonomyLevel, Binding,
+    BrowserConfig, ChannelConfig, ChronicleConfig, ClosePolicy, CoalesceConfig, CompactionConfig,
+    Config, CortexConfig, CronDef, DefaultsConfig, DepartmentDef, DepartmentPolicy, DiscordConfig,
+    DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
+    LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
+    MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
     ParticipantContextConfig, ProjectsConfig, ProviderConfig, ReflectionConfig, SignalConfig,
     SignalInstanceConfig, SkillsConfig, SlackConfig, SlackInstanceConfig, TelegramConfig,
-    TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig,
-    WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
+    TelegramInstanceConfig, TelemetryConfig, ToolAccess, ToolRuleClass, ToolRuleDef, TwitchConfig,
+    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
+    validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -179,6 +180,9 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "telemetry",
     "memory_janitor",
     "autonomy",
+    "authorization",
+    "departments",
+    "tool_rules",
 ];
 
 /// Pre-parse check that warns about unrecognised top-level keys in a config
@@ -1087,6 +1091,8 @@ impl Config {
                 telegram_id: None,
                 slack_id: None,
                 email: None,
+                departments: Vec::new(),
+                admin: false,
             }],
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
@@ -1101,6 +1107,7 @@ impl Config {
             },
             memory_janitor: MemoryJanitorConfig::default(),
             autonomy_ceiling: AutonomyLevel::Act,
+            authorization: AuthorizationConfig::default(),
         })
     }
 
@@ -2749,6 +2756,8 @@ impl Config {
                     telegram_id: h.telegram_id,
                     slack_id: h.slack_id,
                     email: h.email,
+                    departments: h.departments,
+                    admin: h.admin,
                 }
             })
             .collect();
@@ -2766,6 +2775,8 @@ impl Config {
                 telegram_id: None,
                 slack_id: None,
                 email: None,
+                departments: Vec::new(),
+                admin: false,
             });
 
             // Link the default admin to the default agent so the agent sees
@@ -2806,6 +2817,13 @@ impl Config {
             None => AutonomyLevel::Act,
         };
 
+        let authorization = resolve_authorization(
+            toml.authorization,
+            toml.departments,
+            toml.tool_rules,
+            &humans,
+        )?;
+
         Ok(Config {
             instance_dir,
             llm,
@@ -2821,8 +2839,157 @@ impl Config {
             telemetry,
             memory_janitor,
             autonomy_ceiling,
+            authorization,
         })
     }
+}
+
+/// Build and validate the department tool policy. Every reference (department
+/// ids on humans, approvers, the default department, the portal human) must
+/// resolve, so a typo fails the load instead of silently changing access.
+fn resolve_authorization(
+    toml: TomlAuthorizationConfig,
+    departments: Vec<TomlDepartmentDef>,
+    tool_rules: Vec<TomlToolRuleDef>,
+    humans: &[HumanDef],
+) -> std::result::Result<AuthorizationConfig, ConfigError> {
+    let invalid = |message: String| ConfigError::Invalid(message);
+    let human_exists = |id: &str| humans.iter().any(|human| human.id == id);
+
+    let unattended_access = match toml.unattended.as_deref() {
+        None => ToolAccess::Read,
+        Some(value) => match ToolAccess::parse(value) {
+            Some(ToolAccess::Full) => {
+                return Err(invalid(
+                    "authorization.unattended can't be `full`: unattended work has no \
+                     requester to hold responsible for writes"
+                        .into(),
+                ));
+            }
+            Some(access) => access,
+            None => {
+                return Err(invalid(format!(
+                    "authorization.unattended must be one of none, read (got `{value}`)"
+                )));
+            }
+        },
+    };
+
+    let mut resolved_departments: Vec<DepartmentDef> = Vec::with_capacity(departments.len());
+    for department in departments {
+        let id = department.id.trim().to_string();
+        if id.is_empty() {
+            return Err(invalid("departments entries need a non-empty id".into()));
+        }
+        if resolved_departments
+            .iter()
+            .any(|existing| existing.id == id)
+        {
+            return Err(invalid(format!(
+                "department `{id}` is defined more than once"
+            )));
+        }
+        for approver in &department.approvers {
+            if !human_exists(approver) {
+                return Err(invalid(format!(
+                    "department `{id}` lists approver `{approver}`, which is not a [[humans]] id"
+                )));
+            }
+        }
+        let mut policies = Vec::with_capacity(department.policy.len());
+        for policy in department.policy {
+            if policy.servers.is_empty() {
+                return Err(invalid(format!(
+                    "department `{id}` has a policy with no servers"
+                )));
+            }
+            let access = ToolAccess::parse(&policy.access).ok_or_else(|| {
+                invalid(format!(
+                    "department `{id}` policy access must be one of none, read, full (got `{}`)",
+                    policy.access
+                ))
+            })?;
+            policies.push(DepartmentPolicy {
+                servers: policy.servers,
+                tools: policy.tools,
+                access,
+                require_approval: policy.require_approval,
+            });
+        }
+        resolved_departments.push(DepartmentDef {
+            id,
+            approvers: department.approvers,
+            policies,
+        });
+    }
+
+    let department_exists = |id: &str| {
+        resolved_departments
+            .iter()
+            .any(|department| department.id == id)
+    };
+
+    for human in humans {
+        for department in &human.departments {
+            if !department_exists(department) {
+                return Err(invalid(format!(
+                    "human `{}` is in department `{department}`, which is not defined",
+                    human.id
+                )));
+            }
+        }
+    }
+
+    if let Some(default_department) = &toml.default_department
+        && !department_exists(default_department)
+    {
+        return Err(invalid(format!(
+            "authorization.default_department `{default_department}` is not defined"
+        )));
+    }
+
+    if let Some(portal_human) = &toml.portal_human
+        && !human_exists(portal_human)
+    {
+        return Err(invalid(format!(
+            "authorization.portal_human `{portal_human}` is not a [[humans]] id"
+        )));
+    }
+
+    let mut resolved_rules = Vec::with_capacity(tool_rules.len());
+    for rule in tool_rules {
+        if rule.servers.is_empty() {
+            return Err(invalid(
+                "tool_rules entries need at least one server".into(),
+            ));
+        }
+        let class = ToolRuleClass::parse(&rule.class).ok_or_else(|| {
+            invalid(format!(
+                "tool_rules class must be read, write, deny or a name of letters, digits and \
+                 underscores (got `{}`)",
+                rule.class
+            ))
+        })?;
+        let mut unless_args = rule.unless_args.into_iter().collect::<Vec<_>>();
+        unless_args.sort_by(|left, right| left.0.cmp(&right.0));
+        resolved_rules.push(ToolRuleDef {
+            servers: rule.servers,
+            tools: rule.tools,
+            verbs: rule.verbs,
+            entities: rule.entities,
+            unless_args,
+            class,
+        });
+    }
+
+    Ok(AuthorizationConfig {
+        default_department: toml.default_department,
+        unattended_access,
+        portal_human: toml.portal_human,
+        admin_requires_approval: toml.admin_requires_approval.unwrap_or(true),
+        departments: resolved_departments,
+        tool_rules: resolved_rules,
+    })
 }
 
 /// Load `HUMAN.md` from a human's directory, returning `None` if the file

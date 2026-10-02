@@ -523,6 +523,7 @@ pub(super) async fn trigger_warmup(
         let agent_id = agent_id.clone();
         let injection_tx = state.injection_tx.clone();
         let humans = (**state.agent_humans.load()).clone();
+        let authorization = state.authorization.clone();
         let notif_store_warmup = state.notification_store.load().as_ref().clone();
         let autonomy_ceiling = state.autonomy_ceiling.clone();
         tokio::spawn(async move {
@@ -565,6 +566,7 @@ pub(super) async fn trigger_warmup(
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
                 humans: Arc::new(arc_swap::ArcSwap::from_pointee(humans)),
+                authorization,
                 process_control_registry: Arc::new(
                     crate::agent::process_control::ProcessControlRegistry::new(),
                 ),
@@ -1046,6 +1048,7 @@ pub async fn create_agent_internal(
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(
             (**state.agent_humans.load()).clone(),
         )),
+        authorization: state.authorization.clone(),
         working_memory: {
             let tz = agent_config
                 .user_timezone

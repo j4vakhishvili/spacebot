@@ -263,6 +263,9 @@ pub struct ApiState {
     /// Instance-wide autonomy ceiling. The same Arc is cloned into every
     /// AgentDeps, so API writes are visible to agents immediately.
     pub autonomy_ceiling: Arc<ArcSwap<AutonomyLevel>>,
+    /// Department tool policy, shared with every agent so agents created
+    /// through the API are gated by the same live policy.
+    pub authorization: Arc<ArcSwap<crate::config::AuthorizationConfig>>,
     /// Per-agent cron stores for cron job CRUD operations.
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
@@ -636,6 +639,9 @@ impl ApiState {
             config_path: RwLock::new(PathBuf::new()),
             config_write_mutex: tokio::sync::Mutex::new(()),
             autonomy_ceiling: Arc::new(ArcSwap::from_pointee(AutonomyLevel::Act)),
+            authorization: Arc::new(ArcSwap::from_pointee(
+                crate::config::AuthorizationConfig::default(),
+            )),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             task_store: ArcSwap::from_pointee(None),

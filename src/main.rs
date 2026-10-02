@@ -953,6 +953,9 @@ async fn run(
     // Instance-wide autonomy ceiling: one ArcSwap shared between the API and
     // every AgentDeps so ceiling writes take effect without a restart.
     api_state.autonomy_ceiling = Arc::new(arc_swap::ArcSwap::from_pointee(config.autonomy_ceiling));
+    api_state.authorization = Arc::new(arc_swap::ArcSwap::from_pointee(
+        config.authorization.clone(),
+    ));
     api_state.set_task_store(global_task_store.clone());
     api_state.set_goal_store(global_goal_store.clone());
     api_state.set_wiki_store(global_wiki_store.clone());
@@ -1063,6 +1066,9 @@ async fn run(
 
     // Shared humans list (hot-reloadable via ArcSwap, same pattern as agent_links)
     let agent_humans = Arc::new(ArcSwap::from_pointee(config.humans.clone()));
+    // Department tool policy, reloaded together with the humans it references.
+    // The API state holds the same handle so API-created agents share it.
+    let agent_authorization = api_state.authorization.clone();
 
     // These hold the initialized subsystems. Empty until agents are initialized.
     let mut agents: HashMap<spacebot::AgentId, spacebot::Agent> = HashMap::new();
@@ -1133,6 +1139,7 @@ async fn run(
             &mut signal_permissions,
             agent_links.clone(),
             agent_humans.clone(),
+            agent_authorization.clone(),
             injection_tx.clone(),
             global_task_store.clone(),
             global_goal_store.clone(),
@@ -1161,6 +1168,7 @@ async fn run(
             llm_manager.clone(),
             agent_links.clone(),
             agent_humans.clone(),
+            agent_authorization.clone(),
         ));
     } else {
         // Start file watcher in setup mode (no agents to watch yet)
@@ -1180,6 +1188,7 @@ async fn run(
             llm_manager.clone(),
             agent_links.clone(),
             agent_humans.clone(),
+            agent_authorization.clone(),
         ));
     }
 
@@ -1928,6 +1937,8 @@ async fn run(
                                 // before initialize_agents so agents see the
                                 // latest [[humans]] entries.
                                 agent_humans.store(Arc::new(new_config.humans.clone()));
+                                agent_authorization
+                                    .store(Arc::new(new_config.authorization.clone()));
                                 let mut new_watcher_agents = Vec::new();
                                 let mut new_discord_permissions = None;
                                 let mut new_slack_permissions = None;
@@ -1956,6 +1967,7 @@ async fn run(
                                     &mut new_signal_permissions,
                                     agent_links.clone(),
                                     agent_humans.clone(),
+                                    agent_authorization.clone(),
                                     injection_tx.clone(),
                                     global_task_store.clone(),
                                     global_goal_store.clone(),
@@ -1985,6 +1997,7 @@ async fn run(
                                             new_llm_manager.clone(),
                                             agent_links.clone(),
                                             agent_humans.clone(),
+                                            agent_authorization.clone(),
                                         ));
                                         tracing::info!("agents initialized after provider setup");
                                     }
@@ -2185,6 +2198,7 @@ async fn initialize_agents(
     signal_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SignalPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
+    agent_authorization: Arc<ArcSwap<spacebot::config::AuthorizationConfig>>,
     injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
     global_task_store: Arc<spacebot::tasks::TaskStore>,
     global_goal_store: Arc<spacebot::goals::GoalStore>,
@@ -2520,6 +2534,7 @@ async fn initialize_agents(
             links: agent_links.clone(),
             agent_names: agent_name_map.clone(),
             humans: agent_humans.clone(),
+            authorization: agent_authorization.clone(),
             process_control_registry: Arc::new(
                 spacebot::agent::process_control::ProcessControlRegistry::new(),
             ),

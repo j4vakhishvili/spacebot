@@ -844,6 +844,16 @@ fn ensure_humans_in_doc(doc: &mut toml_edit::DocumentMut, humans: &[crate::confi
         if let Some(ref email) = human.email {
             table["email"] = toml_edit::value(email.as_str());
         }
+        if !human.departments.is_empty() {
+            let mut departments = toml_edit::Array::new();
+            for department in &human.departments {
+                departments.push(department.as_str());
+            }
+            table["departments"] = toml_edit::value(departments);
+        }
+        if human.admin {
+            table["admin"] = toml_edit::value(true);
+        }
         humans_array.push(table);
     }
     doc["humans"] = toml_edit::Item::ArrayOfTables(humans_array);
@@ -978,6 +988,8 @@ pub async fn create_human(
         telegram_id: request.telegram_id.clone().filter(|s| !s.is_empty()),
         slack_id: request.slack_id.clone().filter(|s| !s.is_empty()),
         email: request.email.clone().filter(|s| !s.is_empty()),
+        departments: Vec::new(),
+        admin: false,
     };
     let mut humans = (**existing).clone();
     humans.push(new_human.clone());

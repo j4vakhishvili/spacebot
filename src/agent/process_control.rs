@@ -374,6 +374,9 @@ pub struct WorkerRuntimeControl {
     input_tx: Option<mpsc::Sender<WorkerFollowUp>>,
     injection_tx: Option<mpsc::Sender<String>>,
     process_run_logger: Option<crate::conversation::ProcessRunLogger>,
+    /// People the worker acts for. `route` adds follow-up senders here so the
+    /// worker's MCP tools see them on their next call.
+    requesters: Option<crate::authorization::RequesterSet>,
 }
 
 impl WorkerRuntimeControl {
@@ -397,10 +400,17 @@ impl WorkerRuntimeControl {
                 input_tx,
                 injection_tx,
                 process_run_logger,
+                requesters: None,
             },
             cancel_rx,
             terminal_notify,
         )
+    }
+
+    /// Attach the worker's requester set so follow-ups can extend it.
+    pub fn with_requesters(mut self, requesters: crate::authorization::RequesterSet) -> Self {
+        self.requesters = Some(requesters);
+        self
     }
 }
 
@@ -763,6 +773,25 @@ impl ProcessControlRegistry {
             return WorkerMutationResult::NotFound;
         }
         WorkerMutationResult::Applied
+    }
+
+    /// Add the senders of follow-up input to a live worker's requesters.
+    /// Returns `false` when the worker isn't live or carries no requester set.
+    pub async fn extend_worker_requesters(
+        &self,
+        worker_id: WorkerId,
+        requesters: &[crate::authorization::Requester],
+    ) -> bool {
+        let Some(entry) = self.workers.read().await.get(&worker_id).cloned() else {
+            return false;
+        };
+        match &entry.control.requesters {
+            Some(set) => {
+                set.extend(requesters);
+                true
+            }
+            None => false,
+        }
     }
 
     pub async fn inject_running(&self, worker_id: WorkerId, message: String) -> WorkerRouteResult {
@@ -1587,6 +1616,62 @@ mod tests {
             .await
             .unwrap();
         (admission, operation)
+    }
+
+    #[tokio::test]
+    async fn follow_up_senders_join_a_live_workers_requesters() {
+        use crate::authorization::{Requester, RequesterSet};
+
+        let registry = ProcessControlRegistry::new();
+        let worker_id = uuid::Uuid::new_v4();
+        let provenance = provenance(worker_id, "channel", "audit the account");
+        let reservation = registry
+            .reserve_worker(worker_id, &provenance, 4)
+            .await
+            .unwrap();
+        let requesters = RequesterSet::new(vec![Requester::Human {
+            id: "advertiser".into(),
+        }]);
+        registry
+            .register_new_worker(
+                reservation,
+                provenance,
+                WorkerBackend::Builtin,
+                true,
+                operation("channel"),
+                "starting",
+                control().with_requesters(requesters.clone()),
+            )
+            .await
+            .unwrap();
+
+        let seller = Requester::Human {
+            id: "seller".into(),
+        };
+        assert!(
+            registry
+                .extend_worker_requesters(worker_id, std::slice::from_ref(&seller))
+                .await
+        );
+        assert_eq!(
+            requesters.snapshot(),
+            vec![
+                Requester::Human {
+                    id: "advertiser".into()
+                },
+                seller.clone()
+            ]
+        );
+
+        // Workers registered without a requester set (OpenCode, restored) and
+        // unknown workers report that nothing was extended.
+        let (_admission, _operation) =
+            register_new_worker(&registry, uuid::Uuid::new_v4(), "channel", "other").await;
+        assert!(
+            !registry
+                .extend_worker_requesters(uuid::Uuid::new_v4(), &[seller])
+                .await
+        );
     }
 
     async fn register_restored_worker(

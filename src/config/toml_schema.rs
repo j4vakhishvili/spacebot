@@ -33,6 +33,58 @@ pub(super) struct TomlConfig {
     pub(super) memory_janitor: TomlMemoryJanitorConfig,
     #[serde(default)]
     pub(super) autonomy: Option<TomlInstanceAutonomyConfig>,
+    #[serde(default)]
+    pub(super) authorization: TomlAuthorizationConfig,
+    #[serde(default)]
+    pub(super) departments: Vec<TomlDepartmentDef>,
+    #[serde(default)]
+    pub(super) tool_rules: Vec<TomlToolRuleDef>,
+}
+
+/// Top-level `[authorization]` table: instance-wide settings for the
+/// department tool policy. The policy itself is inactive until at least one
+/// `[[departments]]` entry exists.
+#[derive(Deserialize, Default)]
+pub(super) struct TomlAuthorizationConfig {
+    pub(super) default_department: Option<String>,
+    pub(super) unattended: Option<String>,
+    pub(super) portal_human: Option<String>,
+    pub(super) admin_requires_approval: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlDepartmentDef {
+    pub(super) id: String,
+    #[serde(default)]
+    pub(super) approvers: Vec<String>,
+    #[serde(default)]
+    pub(super) policy: Vec<TomlDepartmentPolicy>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlDepartmentPolicy {
+    #[serde(default)]
+    pub(super) servers: Vec<String>,
+    #[serde(default)]
+    pub(super) tools: Vec<String>,
+    pub(super) access: String,
+    #[serde(default)]
+    pub(super) require_approval: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlToolRuleDef {
+    #[serde(default)]
+    pub(super) servers: Vec<String>,
+    #[serde(default)]
+    pub(super) tools: Vec<String>,
+    #[serde(default)]
+    pub(super) verbs: Vec<String>,
+    #[serde(default)]
+    pub(super) entities: Vec<String>,
+    #[serde(default)]
+    pub(super) unless_args: HashMap<String, serde_json::Value>,
+    pub(super) class: String,
 }
 
 /// Top-level `[autonomy]` table: instance-wide settings that apply across
@@ -87,6 +139,10 @@ pub(super) struct TomlHumanDef {
     pub(super) telegram_id: Option<String>,
     pub(super) slack_id: Option<String>,
     pub(super) email: Option<String>,
+    #[serde(default)]
+    pub(super) departments: Vec<String>,
+    #[serde(default)]
+    pub(super) admin: bool,
 }
 
 #[derive(Deserialize, Default)]

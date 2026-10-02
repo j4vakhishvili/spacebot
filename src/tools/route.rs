@@ -77,6 +77,13 @@ impl Tool for RouteTool {
         let Some(snapshot) = registry.worker_snapshot(worker_id).await else {
             return self.detached_worker_output(worker_id).await;
         };
+        // Whoever directs the worker now joins its requesters before the input
+        // lands, so its next MCP call is checked against them as well. Done
+        // before delivery: a follow-up that then fails leaves the worker
+        // narrower, never wider.
+        registry
+            .extend_worker_requesters(worker_id, &self.state.current_requesters())
+            .await;
         let result = if snapshot.state
             == crate::agent::process_control::WorkerRuntimeState::WaitingForInput
         {

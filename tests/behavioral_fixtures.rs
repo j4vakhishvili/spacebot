@@ -169,6 +169,9 @@ async fn bootstrap(instance_dir: &Path) -> anyhow::Result<AgentDeps> {
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         agent_names: Arc::new(HashMap::new()),
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        authorization: Arc::new(arc_swap::ArcSwap::from_pointee(
+            spacebot::config::AuthorizationConfig::default(),
+        )),
         process_control_registry: Arc::new(
             spacebot::agent::process_control::ProcessControlRegistry::new(),
         ),
